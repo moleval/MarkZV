@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Разбор «База СИАЛ.xlsx» -> таблица артикул → габарит сечения → маркер м/б.
+"""Разбор XLS(X)-базы профильной системы -> LISP-таблица «артикул -> габарит».
+
+Работает с любой системой, не только СИАЛ: задайте префиксы артикулов и имя
+системы.
 
 Использование:
   1) посмотреть структуру книги:
        python3 tools/sial_parse.py "База СИАЛ.xlsx"
-  2) сгенерировать LISP-таблицу для MarkZV.lsp (колонки берутся по заголовкам
-     или задаются вручную, нумерация с 1):
-       python3 tools/sial_parse.py "База СИАЛ.xlsx" --emit \
-           --article-col 1 --size-col 5 > sial_table.lsp
+  2) сгенерировать блок регистрации базы:
+       python3 tools/sial_parse.py "База АЛЮТЕХ.xlsx" --emit \
+           --system АЛЮТЕХ --prefix ALT --article-col 1 --size-col 5 \
+           >> MarkZV-bases.lsp
 
-Результат --emit — готовый блок для *mk:article-size*:
-  (setq *mk:article-size* '(("КП45551" . "м") ("КП45364" . "б")))
-плюс справочная таблица «артикул -> габарит».
+Результат --emit — готовый файл базы для MarkZV:
+  (mk:register-base "АЛЮТЕХ" '(("ALT-W72-01" . 72.0) ...))
+  (foreach p '("ALT") (if (not (member p *mk:article-prefixes*)) ...))
 
 Зависимость: pip install openpyxl
 """
@@ -25,14 +28,24 @@ try:
 except ImportError:
     sys.exit("Нужен openpyxl:  pip install openpyxl")
 
-ART_RE = re.compile(r"^\s*(КП|KP)\s*\d{4,6}", re.IGNORECASE)
+DEFAULT_PREFIXES = ["КП", "KP"]
+ART_RE = None
+
+
+def build_re(prefixes):
+    alt = "|".join(re.escape(p) for p in prefixes)
+    # префикс + до двух букв исполнения + пробелы + цифры (+ исполнение через дефис)
+    return re.compile(r"^\s*(?:%s)[A-Za-zА-Яа-я-]{0,3}\s*\d{2,6}(-\d+)?\s*$" % alt,
+                      re.IGNORECASE)
 
 
 def norm_article(v):
     if v is None:
         return None
-    s = str(v).strip().replace(" ", "")
-    return s.upper() if ART_RE.match(s) else None
+    s = str(v).strip()
+    if not ART_RE.match(s):
+        return None
+    return s.replace(" ", "").upper()
 
 
 def to_float(v):
@@ -78,7 +91,13 @@ def main():
     ap.add_argument("--emit", action="store_true")
     ap.add_argument("--article-col", type=int, default=0)
     ap.add_argument("--size-col", type=int, default=0)
+    ap.add_argument("--system", default="СИАЛ", help="имя базы в MarkZV")
+    ap.add_argument("--prefix", action="append", default=[],
+                    help="префикс артикулов (можно повторять); по умолчанию КП/KP")
     a = ap.parse_args()
+
+    global ART_RE
+    ART_RE = build_re(a.prefix or DEFAULT_PREFIXES)
 
     wb = openpyxl.load_workbook(a.xlsx, data_only=True, read_only=True)
     if not a.emit:
@@ -89,13 +108,18 @@ def main():
     if not data:
         sys.exit("Артикулы не распознаны — задайте --article-col/--size-col явно.")
     print(";;; Сгенерировано tools/sial_parse.py из " + a.xlsx)
-    print(";;; артикул -> габарит сечения, мм")
+    print(f";;; База «{a.system}»: артикул -> габарит сечения, мм")
+    print(f'(mk:register-base "{a.system}"')
+    print("  '(")
     for art, (size, sheet) in sorted(data.items(), key=lambda kv: kv[1][0]):
-        print(f";;;   {art:<12} {size:>7.1f}   [{sheet}]")
-    small = min(data.items(), key=lambda kv: kv[1][0])[0]
-    big = max(data.items(), key=lambda kv: kv[1][0])[0]
-    print("\n;;; Пример ручной таблицы м/б (крайние по габариту):")
-    print(f"(setq *mk:article-size* '((\"{small}\" . \"м\") (\"{big}\" . \"б\")))")
+        print(f'    ("{art}" . {size:.1f})')
+    print("  ))")
+    prefixes = a.prefix or DEFAULT_PREFIXES
+    print("")
+    print(";;; префиксы артикулов этой системы")
+    print("(foreach p '(" + " ".join(f'"{p}"' for p in prefixes) + ")")
+    print("  (if (not (member p *mk:article-prefixes*))")
+    print("    (setq *mk:article-prefixes* (cons p *mk:article-prefixes*))))")
 
 
 if __name__ == "__main__":

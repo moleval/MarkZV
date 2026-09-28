@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.4")
+(setq *mk:ver*            "2.5")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -193,7 +193,29 @@
 (setq *mk:thick-cold-max*       32.0)
 
 ;;;=====================================================================
-;;; 2a. БАЗА СИАЛ — ГАБАРИТ СЕЧЕНИЯ ПРОФИЛЯ, мм
+;;; 2a. БАЗЫ ПРОФИЛЬНЫХ СИСТЕМ — ГАБАРИТ СЕЧЕНИЯ, мм
+;;;   Любое число систем: каждая регистрируется своим именем.
+;;;   Внешние базы кладутся в файл MarkZV-bases.lsp рядом с модулем
+;;;   (или в любую папку из путей поиска AutoCAD) и подхватываются при загрузке.
+;;;   Формат файла базы:
+;;;     (mk:register-base "АЛЮТЕХ" '(("ALT-W72-01" . 72.0) ("ALT-W72-05" . 116.0)))
+;;;     (setq *mk:article-prefixes* (cons "ALT" *mk:article-prefixes*))
+;;;=====================================================================
+(setq *mk:size-bases* nil)          ; ((имя . таблица) ...)
+(setq *mk:bases-file* "MarkZV-bases.lsp")   ; файл внешних баз
+
+;; Префиксы артикулов, распознаваемые в именах стилей мультилиний и слоёв
+(setq *mk:article-prefixes* '("КП" "KP"))
+
+(defun mk:register-base (name tbl / hit)
+  (setq hit (assoc name *mk:size-bases*))
+  (if hit
+    (setq *mk:size-bases* (subst (cons name tbl) hit *mk:size-bases*))
+    (setq *mk:size-bases* (cons (cons name tbl) *mk:size-bases*)))
+  (length tbl))
+
+;;;=====================================================================
+;;; 2b. БАЗА СИАЛ — ГАБАРИТ СЕЧЕНИЯ ПРОФИЛЯ, мм
 ;;;   Источник: "База СИАЛ.xlsx", листы "База СИАЛ КП50" и "База СИАЛ КП50К",
 ;;;   разделы "Стойка" и "Ригель" (колонка "Габарит").
 ;;;   Сгенерировано tools/sial_parse.py --emit.
@@ -285,17 +307,26 @@
 
 ;; Габарит сечения профиля по базе СИАЛ; nil, если артикул не найден.
 ;; Сначала точное совпадение, затем исполнение профиля: "КП45303" -> "КП45303-2".
-(defun mk:sial-size (art / k hit out)
+(mk:register-base "СИАЛ" *mk:sial-sizes*)
+
+;; Поиск артикула в одной таблице: точное совпадение, затем исполнение
+;; профиля («КП45303» -> «КП45303-2»)
+(defun mk:size-in-table (k tbl / hit out)
+  (setq out nil hit (assoc k tbl))
+  (if hit
+    (setq out (cdr hit))
+    (foreach pair tbl
+      (if (and (null out)
+               (= (substr (car pair) 1 (1+ (strlen k))) (strcat k "-")))
+        (setq out (cdr pair)))))
+  out)
+
+;; Габарит сечения по всем зарегистрированным базам; nil, если не найден
+(defun mk:sial-size (art / k out)
   (setq k (mk:art-key art) out nil)
   (if (> (strlen k) 0)
-    (progn
-      (setq hit (assoc k *mk:sial-sizes*))
-      (if hit
-        (setq out (cdr hit))
-        (foreach pair *mk:sial-sizes*
-          (if (and (null out)
-                   (= (substr (car pair) 1 (1+ (strlen k))) (strcat k "-")))
-            (setq out (cdr pair)))))))
+    (foreach b *mk:size-bases*
+      (if (null out) (setq out (mk:size-in-table k (cdr b))))))
   out)
 
 ;; Габарит сечения: база СИАЛ в приоритете, иначе замер по блоку
@@ -692,22 +723,31 @@
 ;;;   Донор идеи: mark:fill-extract-segs / mark:fill-verts-to-segs (MarkZ).
 ;;;---------------------------------------------------------------------
 ;; Артикул профиля из строки: «Стойка КП45302 …» -> «КП45302», «КПС 1155» -> «КПС1155»
-(defun mk:article-from-name (s / up n i c out j ch)
+(defun mk:article-from-name (s / up n i c out j ch pfx plen k)
   (setq out nil)
   (if (mk:strp s)
     (progn
       (setq up (strcase s) n (strlen up) i 1)
-      (while (and (<= i (1- n)) (null out))
-        (if (or (= (substr up i 2) "КП") (= (substr up i 2) "KP"))
+      (while (and (<= i n) (null out))
+        ;; какой из известных префиксов начинается в позиции i?
+        (setq pfx nil)
+        (foreach pr *mk:article-prefixes*
+          (if (and (null pfx)
+                   (= (substr up i (strlen pr)) (strcase pr)))
+            (setq pfx (strcase pr))))
+        (if pfx
           (progn
-            (setq out "КП" j (+ i 2))
-            ;; необязательная «С» и пробелы
-            (if (= (substr up j 1) "С")
-              (progn (setq out (strcat out "С")) (setq j (1+ j))))
+            (setq plen (strlen pfx) out pfx j (+ i plen) k 0)
+            ;; до двух необязательных букв исполнения (КПС, КПБ и т. п.)
+            (while (and (< k 2)
+                        (not (member (substr up j 1)
+                                     '("" " " "0" "1" "2" "3" "4" "5" "6" "7"
+                                       "8" "9" "-" "(" ")" "." ",")))) 
+              (setq out (strcat out (substr up j 1)) j (1+ j) k (1+ k)))
             (while (= (substr up j 1) " ") (setq j (1+ j)))
             (setq ch (substr up j 1))
             (if (or (= ch "") (null (member ch '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9"))))
-              (setq out nil)                     ; «КП» без цифр — не артикул
+              (setq out nil)                     ; префикс без цифр — не артикул
               (progn
                 (while (member (substr up j 1)
                                '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "-"))
@@ -3388,6 +3428,32 @@
   (princ))
 
 ;;;=====================================================================
+;;; 20b. ВНЕШНИЕ БАЗЫ ПРОФИЛЬНЫХ СИСТЕМ
+;;;=====================================================================
+;; Подхват файла MarkZV-bases.lsp (рядом с модулем или в путях поиска AutoCAD)
+(defun mk:load-bases (/ f res)
+  (setq f (findfile *mk:bases-file*))
+  (if f
+    (progn
+      (setq res (vl-catch-all-apply 'load (list f)))
+      (if (vl-catch-all-error-p res)
+        (prompt (strcat "\n  [WARN] Файл баз не загружен: " f))
+        (prompt (strcat "\n  [OK] Базы профилей: " f)))))
+  f)
+
+(defun c:МАРКАВБАЗЫ (/ n)
+  (prompt "\n[МАРКАВБАЗЫ] Зарегистрированные базы профилей:")
+  (if (null *mk:size-bases*)
+    (prompt "\n  (пусто)")
+    (foreach b *mk:size-bases*
+      (prompt (strcat "\n  " (car b) " — записей: " (itoa (length (cdr b)))))))
+  (prompt (strcat "\n  Префиксы артикулов: "
+                  (mk:join *mk:article-prefixes* ", ")))
+  (prompt (strcat "\n  Файл внешних баз: " *mk:bases-file*
+                  (if (findfile *mk:bases-file*) " (найден)" " (не найден)")))
+  (princ))
+
+;;;=====================================================================
 ;;; 21. ИНИЦИАЛИЗАЦИЯ С АВТОПРОВЕРКОЙ
 ;;;=====================================================================
 (prompt (strcat "\n[MarkZV] Ред. " *mk:ver* " загружена."))
@@ -3399,5 +3465,7 @@
 (prompt "\n    МАРКАВРГ        - Марки ригелей")
 (prompt "\n    МАРКАВТАБЛ      - Ведомость профилей: таблица в чертеже + XLS")
 (prompt "\n    МАРКАВДИАГНОЗ   - Диагностика блока (свойства, атрибуты, габарит)")
+(prompt "\n    МАРКАВБАЗЫ      - Список баз профильных систем")
 (prompt "\n    МАРКАВСКОБКИ    - Проверка баланса скобок файла")
+(mk:load-bases)
 (princ)
