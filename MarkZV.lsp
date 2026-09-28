@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.5")
+(setq *mk:ver*            "2.6")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -151,9 +151,15 @@
 (setq *mk:layer-test*           "Сетка витража тест")
 (setq *mk:group-model*          "Сетка_витража")        ; имя группы — без пробелов
 (setq *mk:group-test*           "Сетка_витража_тест")
-;; Припуск длины ригеля относительно светового проёма (СИАЛ КП50/КП50К):
-;; +12.5 мм на сторону, итого +25 мм к длине мультилинии/динамики.
+;; Припуск длины ригеля относительно нарисованного размера (в свету).
+;; Значение по умолчанию: +12.5 мм на сторону, итого +25 мм.
 (setq *mk:beam-allowance*       25.0)
+;; Припуск по артикулу профиля: ((маска . припуск) ...), маска — wcmatch,
+;; ВЕРХНИЙ регистр. Проверяется раньше значения по умолчанию.
+;; Пример для разных систем:
+;;   (setq *mk:beam-allowance-by-article*
+;;     '(("КП50К*" . 25.0) ("КП453*" . 25.0)))
+(setq *mk:beam-allowance-by-article* nil)
 ;; Пакетный режим (команда МАРКАВ): общая выборка, один UNDO, без повторных вопросов
 (setq *mk:batch*                nil)
 (setq *mk:batch-ss*             nil)
@@ -1774,7 +1780,7 @@
         (write-line (strcat "  LENGTH: " (vl-prin1-to-string (cdr (assoc 'LENGTH beam)))
                             "  (источник: " (if (cdr (assoc 'SIZE_SRC beam)) (cdr (assoc 'SIZE_SRC beam)) "НЕТ") ")"
                             "  ПРОФИЛЬ: " (if (cdr (assoc 'LENGTH beam))
-                                            (rtos (mk:beam-cut-len (cdr (assoc 'LENGTH beam))) 2 1) "?")) f)
+                                            (rtos (mk:beam-cut-len-el beam) 2 1) "?")) f)
         (write-line (strcat "  АРТИКУЛ: " (if (cdr (assoc 'ARTICLE beam)) (cdr (assoc 'ARTICLE beam)) "НЕТ")) f)
         (write-line (strcat "  TOP_ELEM: " (if (cdr (assoc 'TOP_ELEM beam)) "Есть" "Нет")) f)
         (write-line (strcat "  BOT_ELEM: " (if (cdr (assoc 'BOT_ELEM beam)) "Есть" "Нет")) f)
@@ -2905,9 +2911,24 @@
 
 (defun mk:tab-int (x) (itoa (fix (+ (float x) 0.5))))
 
-;; Длина профиля ригеля = размер в свету + припуск (12.5 мм на сторону)
-(defun mk:beam-cut-len (len)
+;; Припуск для конкретного артикула
+(defun mk:beam-allowance-for (art / k out)
+  (setq k (mk:art-key art) out nil)
+  (if (> (strlen k) 0)
+    (foreach pair *mk:beam-allowance-by-article*
+      (if (and (null out) (wcmatch k (strcase (car pair))))
+        (setq out (cdr pair)))))
+  (if (numberp out) out *mk:beam-allowance*))
+
+;; Длина профиля ригеля = нарисованный размер + припуск
+(defun mk:beam-cut-len (len / art)
   (if (numberp len) (+ (float len) *mk:beam-allowance*) 0.0))
+
+(defun mk:beam-cut-len-el (el / len)
+  (setq len (mk:rec-get el 'LENGTH))
+  (if (numberp len)
+    (+ (float len) (mk:beam-allowance-for (mk:rec-get el 'ARTICLE)))
+    0.0))
 
 (defun mk:tab-mp (len cnt) (/ (* (float len) cnt) 1000.0))
 
@@ -2924,7 +2945,7 @@
     (setq out (cons (list 2 "Ригели"
                           (if (mk:rec-get el 'ARTICLE) (mk:rec-get el 'ARTICLE) "—")
                           (mk:read-mark el)
-                          (mk:beam-cut-len (mk:rec-get el 'LENGTH)))
+                          (mk:beam-cut-len-el el))
                     out)))
   (reverse out))
 
