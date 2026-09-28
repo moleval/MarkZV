@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.1")
+(setq *mk:ver*            "2.2")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -178,6 +178,8 @@
 (setq *mk:label-line-gap*       1.4)              ; межстрочие (x высоту)
 (setq *mk:label-rot-post*       90.0)             ; поворот подписи стойки, град
 (setq *mk:cross-fallback*       50.0)             ; габарит сечения, если неизвестен
+;; Типы объектов, считающихся профилем (полилинии и линии игнорируются).
+(setq *mk:seg-types*            '("MLINE"))
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -775,7 +777,7 @@
       (repeat (sslength ss)
         (setq e   (ssname ss i)
               typ (cdr (assoc 0 (entget e))))
-        (if (member typ '("LINE" "LWPOLYLINE" "POLYLINE" "MLINE"))
+        (if (member typ *mk:seg-types*)
           (progn
             (setq segs (mk:ent-segs e))
             (foreach sg segs (setq out (cons (cons e sg) out)))))
@@ -2758,17 +2760,41 @@
     ((setq hit (assoc e *mk:mark-map*)) (cdr hit))
     (t "—")))
 
+;; Натуральный ключ сортировки: числа дополняются нулями слева,
+;; поэтому Ст2 < Ст10, Рг9 < Рг10.
+(defun mk:nat-key (s / up n i c out num)
+  (if (not (mk:strp s))
+    ""
+    (progn
+      (setq up (strcase s) n (strlen up) i 1 out "" num "")
+      (while (<= i n)
+        (setq c (substr up i 1))
+        (if (member c '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9"))
+          (setq num (strcat num c))
+          (progn
+            (if (> (strlen num) 0)
+              (progn
+                (while (< (strlen num) 6) (setq num (strcat "0" num)))
+                (setq out (strcat out num) num "")))
+            (setq out (strcat out c))))
+        (setq i (1+ i)))
+      (if (> (strlen num) 0)
+        (progn
+          (while (< (strlen num) 6) (setq num (strcat "0" num)))
+          (setq out (strcat out num))))
+      out)))
+
 (defun mk:tab-less (a b / aa ab ma mb)
   (cond
     ((< (nth 0 a) (nth 0 b)) t)
     ((> (nth 0 a) (nth 0 b)) nil)
     (t
-     (setq aa (strcase (nth 2 a)) ab (strcase (nth 2 b)))
+     (setq aa (mk:nat-key (nth 2 a)) ab (mk:nat-key (nth 2 b)))
      (cond
        ((< aa ab) t)
        ((> aa ab) nil)
        (t
-        (setq ma (strcase (nth 3 a)) mb (strcase (nth 3 b)))
+        (setq ma (mk:nat-key (nth 3 a)) mb (mk:nat-key (nth 3 b)))
         (cond
           ((< ma mb) t)
           ((> ma mb) nil)
