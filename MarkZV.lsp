@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "1.5")
+(setq *mk:ver*            "1.6")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -154,6 +154,11 @@
 ;; Припуск длины ригеля относительно светового проёма (СИАЛ КП50/КП50К):
 ;; +12.5 мм на сторону, итого +25 мм к длине мультилинии/динамики.
 (setq *mk:beam-allowance*       25.0)
+;; Пакетный режим (команда МАРКАВ): общая выборка, один UNDO, без повторных вопросов
+(setq *mk:batch*                nil)
+(setq *mk:batch-ss*             nil)
+(setq *mk:batch-mode*           nil)   ; "Блоки" / "Мультилинии" — режим каркаса
+(setq *mk:batch-keep-grid*      nil)   ; оставлять ли сетку после пакета
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -1853,8 +1858,13 @@
 ;; Область действия команды: своя выборка -> выборка последней МАРКАВГЕОМЕТРИЯ ->
 ;; (только если ничего нет) весь чертёж.
 (defun mk:scope-ss (/ ss n)
-  (prompt "\nВыберите элементы витража (Enter — выборка последней МАРКАВГЕОМЕТРИЯ): ")
-  (setq ss (ssget (list (cons 0 "INSERT"))))
+  (if (and *mk:batch* *mk:last-ss*)
+    (progn
+      (prompt "\n  Область: выборка пакета МАРКАВ")
+      (setq ss *mk:last-ss*))
+    (progn
+      (prompt "\nВыберите элементы витража (Enter — выборка последней МАРКАВГЕОМЕТРИЯ): ")
+      (setq ss (ssget (list (cons 0 "INSERT"))))))
   (cond
     (ss
      (setq *mk:last-ss* ss)
@@ -1871,7 +1881,9 @@
          (mk:ss-all-inserts))))))
 
 (defun mk:undo-begin (/ doc)
-  (setq doc (mk:ax-get (vlax-get-acad-object) "ActiveDocument"))
+  (if *mk:batch*
+    (setq doc nil)                       ; в пакете UNDO ставит сама МАРКАВ
+    (setq doc (mk:ax-get (vlax-get-acad-object) "ActiveDocument")))
   (if doc (vl-catch-all-apply 'vlax-invoke-method (list doc "StartUndoMark")))
   doc)
 
@@ -1977,9 +1989,14 @@
                       out-count post-result protruding-count mlines
                       mline-result use-mlines mode-kw post-enames beam-enames)
   (prompt "\n[МАРКАВГЕОМЕТРИЯ] Сбор данных и построение 2D модели витража...")
-  (prompt "\nВыберите элементы витража (рамкой): ")
   (setq *mk:dyn-cache* nil)
-  (setq ss (ssget))
+  (if (and *mk:batch* *mk:batch-ss*)
+    (progn
+      (setq ss *mk:batch-ss*)
+      (prompt "\n  Область: выборка пакета МАРКАВ"))
+    (progn
+      (prompt "\nВыберите элементы витража (рамкой): ")
+      (setq ss (ssget))))
   (if ss (setq *mk:last-ss* ss))
   (if (null ss)
     (prompt "\n[INFO] Ничего не выбрано."))
@@ -1995,8 +2012,11 @@
   (prompt "\n[2/8] Поиск элементов каркаса в выборке...")
   (setq mlines (mk:find-mlines-in-ss ss))
   (prompt (strcat "\n  Мультилиний найдено: " (itoa (length mlines))))
-  (initget "Блоки Мультилинии B M")
-  (setq mode-kw (getkword "\nРежим сбора каркаса [Блоки/Мультилинии] <Мультилинии>: "))
+  (if (and *mk:batch* *mk:batch-mode*)
+    (setq mode-kw *mk:batch-mode*)
+    (progn
+      (initget "Блоки Мультилинии B M")
+      (setq mode-kw (getkword "\nРежим сбора каркаса [Блоки/Мультилинии] <Мультилинии>: "))))
   (if (or (null mode-kw) (= mode-kw "Мультилинии") (= mode-kw "M"))
     (setq use-mlines t)
     (setq use-mlines nil))
@@ -2577,10 +2597,95 @@
   (princ))
 
 ;;;=====================================================================
+;;; 20b. ПАКЕТНЫЙ ПРОГОН — МАРКАВ
+;;;   Одна выборка -> сбор и сетка -> марки стоек -> марки ригелей ->
+;;;   удаление сетки -> ведомость. Один UNDO на весь пакет.
+;;;=====================================================================
+;; Удалить группу по имени (если существует)
+(defun mk:group-delete (name / doc groups g)
+  (setq doc    (mk:ax-get (vlax-get-acad-object) "ActiveDocument")
+        groups (if doc (mk:ax-get doc "Groups") nil))
+  (if groups
+    (progn
+      (setq g (vl-catch-all-apply 'vlax-invoke-method (list groups "Item" name)))
+      (if (and g (not (vl-catch-all-error-p g)))
+        (vl-catch-all-apply 'vlax-invoke-method (list g "Delete")))))
+  nil)
+
+;; Удалить всю отрисовку модели: объекты слоя + одноимённую группу
+(defun mk:erase-model (layer group / ss i n)
+  (mk:group-delete group)
+  (setq ss (ssget "_X" (list (cons 8 layer))))
+  (setq n 0)
+  (if ss
+    (progn
+      (setq i (sslength ss))
+      (repeat i
+        (setq i (1- i))
+        (if (entdel (ssname ss i)) (setq n (1+ n))))))
+  (prompt (strcat "\n  [OK] Сетка удалена, объектов: " (itoa n)))
+  n)
+
+(defun c:МАРКАВ (/ ss keep doc n-posts n-beams)
+  (prompt (strcat "\n[МАРКАВ] Пакетный прогон, Ред. " *mk:ver* "."))
+  (prompt "\n  Этапы: сбор и сетка -> марки стоек -> марки ригелей -> ведомость.")
+  (setq *mk:batch* nil *mk:batch-ss* nil *mk:batch-mode* nil)
+  (setq *mk:dyn-cache* nil)
+  (prompt "\nВыберите элементы витража (рамкой): ")
+  (setq ss (ssget))
+  (if (null ss)
+    (prompt "\n[INFO] Ничего не выбрано — пакет прерван.")
+    (progn
+      (prompt (strcat "\n  Выбрано объектов: " (itoa (sslength ss))))
+      ;; режим каркаса спрашиваем один раз на весь пакет
+      (initget "Блоки Мультилинии B M")
+      (setq *mk:batch-mode*
+        (getkword "\nРежим сбора каркаса [Блоки/Мультилинии] <Блоки>: "))
+      (if (or (null *mk:batch-mode*) (= *mk:batch-mode* "B"))
+        (setq *mk:batch-mode* "Блоки"))
+      (if (= *mk:batch-mode* "M") (setq *mk:batch-mode* "Мультилинии"))
+      ;; судьба сетки
+      (initget "Да Нет")
+      (setq keep (getkword "\nОставить сетку витража в чертеже? [Да/Нет] <Нет>: "))
+      (setq *mk:batch-keep-grid* (= keep "Да"))
+      ;; один UNDO на весь пакет
+      (setq doc (mk:ax-get (vlax-get-acad-object) "ActiveDocument"))
+      (if doc (vl-catch-all-apply 'vlax-invoke-method (list doc "StartUndoMark")))
+      (setq *mk:batch* t *mk:batch-ss* ss *mk:last-ss* ss)
+      ;; --- 1/4 сбор, проверки, сетка, дамп
+      (prompt "\n\n===== [ЭТАП 1/4] МАРКАВГЕОМЕТРИЯ =====")
+      (c:МАРКАВГЕОМЕТРИЯ)
+      ;; --- 2/4 стойки
+      (prompt "\n\n===== [ЭТАП 2/4] МАРКАВСТ =====")
+      (c:МАРКАВСТ)
+      ;; --- 3/4 ригели
+      (prompt "\n\n===== [ЭТАП 3/4] МАРКАВРГ =====")
+      (c:МАРКАВРГ)
+      ;; --- сетка больше не нужна: марки записаны в атрибуты блоков,
+      ;;     а ведомость дальше просит указать точку вставки таблицы —
+      ;;     чертёж к этому моменту должен быть чистым.
+      (if *mk:batch-keep-grid*
+        (prompt (strcat "\n\n  [INFO] Сетка оставлена на слое «" *mk:layer-model*
+                        "» (группа " *mk:group-model* ")."))
+        (progn
+          (prompt "\n\n  Удаление сетки витража перед вставкой таблицы...")
+          (mk:erase-model *mk:layer-model* *mk:group-model*)
+          (mk:erase-model *mk:layer-test*  *mk:group-test*)))
+      ;; --- 4/4 ведомость
+      (prompt "\n\n===== [ЭТАП 4/4] МАРКАВТАБЛ =====")
+      (c:МАРКАВТАБЛ)
+      (setq *mk:batch* nil *mk:batch-ss* nil *mk:batch-mode* nil)
+      (if doc (vl-catch-all-apply 'vlax-invoke-method (list doc "EndUndoMark")))
+      (prompt "\n\n[ГОТОВО] Пакет МАРКАВ завершён. Откат всего пакета — один U.")))
+  (setq *mk:batch* nil)
+  (princ))
+
+;;;=====================================================================
 ;;; 21. ИНИЦИАЛИЗАЦИЯ С АВТОПРОВЕРКОЙ
 ;;;=====================================================================
 (prompt (strcat "\n[MarkZV] Ред. " *mk:ver* " загружена."))
 (prompt "\n  Команды:")
+(prompt "\n    МАРКАВ          - Пакет: сбор -> марки стоек -> марки ригелей -> ведомость")
 (prompt "\n    МАРКАВГЕОМЕТРИЯ - Сбор данных и построение 2D модели")
 (prompt "\n    МАРКАВМОДЕЛЬ    - Тестовая отрисовка модели")
 (prompt "\n    МАРКАВСТ        - Марки стоек")
