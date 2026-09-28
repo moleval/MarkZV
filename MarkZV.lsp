@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.0")
+(setq *mk:ver*            "2.1")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -177,6 +177,7 @@
 (setq *mk:label-end-gap*        100.0)            ; недоход до края профиля
 (setq *mk:label-line-gap*       1.4)              ; межстрочие (x высоту)
 (setq *mk:label-rot-post*       90.0)             ; поворот подписи стойки, град
+(setq *mk:cross-fallback*       50.0)             ; габарит сечения, если неизвестен
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -799,6 +800,20 @@
   (if cur (setq out (cons (reverse cur) out)))
   (reverse out))
 
+;; Габарит сечения мультилинии: (max-min смещений стиля) x масштаб элемента
+(defun mk:mline-cross (e / ed sd offs w sc)
+  (setq ed (if e (entget e) nil) w nil)
+  (if (and ed (= (cdr (assoc 0 ed)) "MLINE") (cdr (assoc 340 ed)))
+    (progn
+      (setq sc   (if (numberp (cdr (assoc 40 ed))) (abs (cdr (assoc 40 ed))) 1.0)
+            sd   (entget (cdr (assoc 340 ed)))
+            offs nil)
+      (foreach pair sd
+        (if (= (car pair) 49) (setq offs (cons (cdr pair) offs))))
+      (if (> (length offs) 1)
+        (setq w (* sc (- (apply 'max offs) (apply 'min offs)))))))
+  (if (and (numberp w) (> w 1.0)) w nil))
+
 (defun mk:track-elem (grp etype / axs a0 a1 s0 s1 cross)
   (setq axs   (mapcar '(lambda (x) (nth 1 x)) grp)
         a0    (apply 'min axs)
@@ -809,7 +824,11 @@
   (list (nth 0 (car grp))            ; ename (первый объект группы)
         (/ (+ a0 a1) 2.0)            ; ось
         s0 s1                        ; протяжённость
-        (if (> cross 1.0) cross 0.0) ; габарит сечения
+        ;; габарит сечения: из геометрии, иначе из стиля мультилинии
+        (cond
+          ((> cross 1.0) cross)
+          ((mk:mline-cross (nth 0 (car grp))) (mk:mline-cross (nth 0 (car grp))))
+          (t 0.0))
         etype))
 
 ;; Каркас из геометрии + блоков. Блоки в приоритете (у них артикул и «Марка»).
@@ -1901,22 +1920,49 @@
             (setq out (cons typ out)))))))
   (if out (mk:join (vl-sort out '<) "+") "ПУСТО"))
 
+;; Подробная «подпись» стороны: тип + отметки примыкания относительно низа
+;; стойки. Две стойки зеркальны, только если подписи сторон совпадают
+;; накрест (одинаковое число примыканий на тех же отметках).
+(defun mk:side-sig (post elements lo hi / span base out typ xr yr cx)
+  (setq span (mk:post-span post)
+        base (car span)
+        out  nil)
+  (if (and lo hi)
+    (foreach el elements
+      (if (cdr (assoc 'INS_PT el))
+        (progn
+          (setq xr (mk:el-xrange el)
+                yr (mk:el-yrange el)
+                cx (/ (+ (car xr) (cadr xr)) 2.0)
+                typ (cdr (assoc 'TYPE el)))
+          (if (and (> cx (- lo *mk:tol-adjacency*))
+                   (< cx (+ hi *mk:tol-adjacency*))
+                   (mk:overlap? (car yr) (cadr yr) (car span) (cadr span)))
+            (setq out (cons (strcat typ ":" (mk:size-key (- (car yr) base))
+                                    "-" (mk:size-key (- (cadr yr) base)))
+                            out)))))))
+  (if out (mk:join (vl-sort out '<) "+") "ПУСТО"))
+
 ;; Разметка стоек: LEFT_TYPES / RIGHT_TYPES / ORIENT / GROUP_KEY
-(defun mk:annotate-posts (posts elements / axes out x lt rt art len canon)
+(defun mk:annotate-posts (posts elements / axes out x lt rt ls rs art len canon)
   (setq axes (mk:post-axes posts) out nil)
   (foreach post posts
     (setq x   (car (cdr (assoc 'INS_PT post)))
           lt  (mk:side-types post elements (mk:axis-prev axes x) x)
           rt  (mk:side-types post elements x (mk:axis-next axes x))
+          ls  (mk:side-sig   post elements (mk:axis-prev axes x) x)
+          rs  (mk:side-sig   post elements x (mk:axis-next axes x))
           len (mk:size-key (mk:rec-get post 'LENGTH))
           art (if (mk:rec-get post 'ARTICLE) (mk:rec-get post 'ARTICLE) "БЕЗ_АРТИКУЛА"))
     ;; канонический ключ не зависит от того, зеркальна стойка или нет
-    (setq canon (if (<= (strcase lt) (strcase rt))
-                  (strcat lt ">" rt)
-                  (strcat rt ">" lt)))
+    (setq canon (if (<= (strcase ls) (strcase rs))
+                  (strcat ls ">" rs)
+                  (strcat rs ">" ls)))
     (setq post (mk:rec-put post 'LEFT_TYPES  lt))
     (setq post (mk:rec-put post 'RIGHT_TYPES rt))
-    (setq post (mk:rec-put post 'ORIENT      (strcat lt ">" rt)))
+    (setq post (mk:rec-put post 'LEFT_SIG    ls))
+    (setq post (mk:rec-put post 'RIGHT_SIG   rs))
+    (setq post (mk:rec-put post 'ORIENT      (strcat ls ">" rs)))
     (setq post (mk:rec-put post 'GROUP_KEY   (strcat len "_" art "_" canon)))
     (setq out (cons post out)))
   (reverse out))
@@ -2230,6 +2276,7 @@
         cross (if (numberp (mk:rec-get el 'CROSS)) (mk:rec-get el 'CROSS) 0.0)
         etype (cdr (assoc 'TYPE el))
         step  (* *mk:label-line-gap* *mk:label-height*))
+  (if (<= cross 1.0) (setq cross *mk:cross-fallback*))   ; отступ от грани, не от оси
   (if (null p)
     nil
     (progn
@@ -2368,7 +2415,7 @@
       (setq doc (mk:undo-begin))
       (foreach item plan
         (setq res (mk:write-marks (cadr item) (car item)))
-        (prompt (strcat "\n  " (car item) " — шт.: " (itoa (car res))
+        (prompt (strcat "\n  " (car item) " — шт.: " (itoa (length (cadr item)))
                         "   [" (mk:rec-get (car (cadr item)) 'LEFT_TYPES)
                         " | " (mk:rec-get (car (cadr item)) 'RIGHT_TYPES) "]"))
         (setq count      (+ count (car res))
@@ -2410,7 +2457,7 @@
       (setq doc (mk:undo-begin))
       (foreach item plan
         (setq res (mk:write-marks (cadr item) (car item)))
-        (prompt (strcat "\n  " (car item) " — шт.: " (itoa (car res))))
+        (prompt (strcat "\n  " (car item) " — шт.: " (itoa (length (cadr item)))))
         (setq count      (+ count (car res))
               skip-count (+ skip-count (cadr res))
               lab-count  (+ lab-count (caddr res))))
