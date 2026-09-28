@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "1.7")
+(setq *mk:ver*            "1.8")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -163,6 +163,10 @@
 ;; Режим «Все-типы»: слияние параллельных линий одного профиля и отсев мусора
 (setq *mk:merge-width*          200.0) ; макс. расстояние между линиями профиля
 (setq *mk:min-seg*              50.0)  ; короче — не элемент каркаса
+;; Сшивать ли коллинеарные куски одного профиля, идущие встык (мм зазора).
+;; 0 — не сшивать. Для стоек, нарисованных по ячейкам, поставьте 60.0.
+(setq *mk:join-posts-gap*       0.0)
+(setq *mk:join-beams-gap*       0.0)
 ;; Выноски марок для элементов без атрибута «Марка»
 (setq *mk:layer-label*          "Марки выноски")
 (setq *mk:group-label*          "Марки_выноски")
@@ -317,9 +321,17 @@
   (and (mk:strp s1) (mk:strp s2)
        (= (strcase (mk:trim s1)) (strcase (mk:trim s2)))))
 
-(defun mk:blk-match? (ename target / obj eff-name names nm found)
-  (setq found nil names nil)
-  (setq nm (cdr (assoc 2 (entget ename))))
+(defun mk:blk-match? (ename target / obj eff-name names nm found ed)
+  (setq found nil names nil ed (entget ename))
+  ;; ВАЖНО: только вставки блоков. У MLINE в DXF 2 лежит имя стиля мультилинии
+  ;; (например «Стойка (вертикальный профиль)») — без этой проверки
+  ;; мультилинии принимались за блоки.
+  (if (not (= (cdr (assoc 0 ed)) "INSERT"))
+    (setq names nil ed nil))
+  (if (null ed)
+    nil
+    (progn
+  (setq nm (cdr (assoc 2 ed)))
   (if (mk:strp nm) (setq names (cons nm names)))
   (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
   (if (and (not (vl-catch-all-error-p obj)) obj)
@@ -329,7 +341,7 @@
         (setq names (cons nm names)))))
   (foreach nm names
     (if (and (null found) (wcmatch (strcase nm) (strcase target)))
-      (setq found t)))
+      (setq found t)))))
   found)
 
 ;;;=====================================================================
@@ -717,13 +729,13 @@
 ;; Слияние параллельных отрезков одного профиля:
 ;; ось = среднее, протяжённость = объединение, сечение = разброс осей.
 ;; rec: (ename ось нач кон)
-(defun mk:merge-tracks (recs / sorted out cur base ax a b)
+(defun mk:merge-tracks (recs gap / sorted out cur base ax a b)
   (setq sorted (vl-sort recs '(lambda (p q) (< (nth 1 p) (nth 1 q))))
         out nil cur nil)
   (foreach r sorted
     (if (and cur
              (<= (- (nth 1 r) (nth 1 (car cur))) *mk:merge-width*)
-             (> (min (nth 3 r) (apply 'max (mapcar '(lambda (x) (nth 3 x)) cur)))
+             (> (+ (min (nth 3 r) (apply 'max (mapcar '(lambda (x) (nth 3 x)) cur))) gap)
                 (max (nth 2 r) (apply 'min (mapcar '(lambda (x) (nth 2 x)) cur)))))
       (setq cur (cons r cur))
       (progn
@@ -770,7 +782,7 @@
                                  (min (nth 1 r) (nth 3 r))
                                  (max (nth 1 r) (nth 3 r))) hrecs))))))
   (setq posts nil beams nil)
-  (foreach grp (mk:merge-tracks vrecs)
+  (foreach grp (mk:merge-tracks vrecs *mk:join-posts-gap*)
     (setq tr (mk:track-elem grp "СТОЙКА")
           ax (nth 1 tr) s0 (nth 2 tr) s1 (nth 3 tr) cross (nth 4 tr))
     (if (not (mk:elem-covered? ax s0 s1 bposts "СТОЙКА"))
@@ -781,7 +793,7 @@
         (cons 'CROSS cross) (cons 'ARTICLE nil) (cons 'VISIBILITY nil)
         (cons 'LEFT_CONN nil) (cons 'RIGHT_CONN nil) (cons 'PROTRUDING nil)
       ) posts))))
-  (foreach grp (mk:merge-tracks hrecs)
+  (foreach grp (mk:merge-tracks hrecs *mk:join-beams-gap*)
     (setq tr (mk:track-elem grp "РИГЕЛЬ")
           ax (nth 1 tr) s0 (nth 2 tr) s1 (nth 3 tr) cross (nth 4 tr))
     (if (not (mk:elem-covered? ax s0 s1 bbeams "РИГЕЛЬ"))
@@ -932,6 +944,41 @@
 ;;;=====================================================================
 ;;; 10. ПОИСК БЛОКОВ В ВЫБОРКЕ
 ;;;=====================================================================
+;; Элемент каркаса пригоден, если есть точка вставки и положительная длина
+(defun mk:valid-frame? (el / p l)
+  (setq p (cdr (assoc 'INS_PT el))
+        l (cdr (assoc 'LENGTH el)))
+  (and p (listp p) (numberp (car p)) (numberp (cadr p))
+       (numberp l) (> l 0.0)))
+
+;; Панель пригодна, если есть точка вставки и положительные габариты
+(defun mk:valid-panel? (el / p w h)
+  (setq p (cdr (assoc 'INS_PT el))
+        w (cdr (assoc 'WIDTH el))
+        h (cdr (assoc 'HEIGHT el)))
+  (and p (listp p) (numberp (car p)) (numberp (cadr p))
+       (numberp w) (> w 0.0) (numberp h) (> h 0.0)))
+
+(defun mk:sanitize-panels (els label / out bad)
+  (setq out nil bad 0)
+  (foreach el els
+    (if (mk:valid-panel? el)
+      (setq out (cons el out))
+      (setq bad (1+ bad))))
+  (if (> bad 0)
+    (prompt (strcat "\n  [WARN] " label ": отброшено без габаритов — " (itoa bad))))
+  (reverse out))
+
+(defun mk:sanitize-frame (els label / out bad)
+  (setq out nil bad 0)
+  (foreach el els
+    (if (mk:valid-frame? el)
+      (setq out (cons el out))
+      (setq bad (1+ bad))))
+  (if (> bad 0)
+    (prompt (strcat "\n  [WARN] " label ": отброшено без размеров — " (itoa bad))))
+  (reverse out))
+
 (defun mk:find-blocks-in-ss (ss mask / i e lst)
   (setq lst nil)
   (if ss
@@ -2166,9 +2213,17 @@
                    (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*"))))
      (setq beams (mapcar 'mk:collect-beam
                    (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*"))))))
-  (setq fills   (mapcar 'mk:collect-fill   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill*   "*"))))
-  (setq windows (mapcar 'mk:collect-window (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*"))))
-  (setq doors   (mapcar 'mk:collect-door   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door*   "*"))))
+  (setq posts (mk:sanitize-frame posts "Стойки"))
+  (setq beams (mk:sanitize-frame beams "Ригели"))
+  (setq fills   (mk:sanitize-panels
+                  (mapcar 'mk:collect-fill (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
+                  "Заполнения"))
+  (setq windows (mk:sanitize-panels
+                  (mapcar 'mk:collect-window (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*")))
+                  "Окна"))
+  (setq doors   (mk:sanitize-panels
+                  (mapcar 'mk:collect-door (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door* "*")))
+                  "Двери"))
   (list (cons 'POSTS posts) (cons 'BEAMS beams) (cons 'FILLS fills)
         (cons 'WINDOWS windows) (cons 'DOORS doors)
         (cons 'PANELS (append fills windows doors))))
@@ -2315,12 +2370,14 @@
      (setq beam-enames (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*")))
      (setq posts (mapcar 'mk:collect-post post-enames))
      (setq beams (mapcar 'mk:collect-beam beam-enames))))
+  (setq posts (mk:sanitize-frame posts "Стойки"))
+  (setq beams (mk:sanitize-frame beams "Ригели"))
   (setq fills   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
   (setq windows (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*")))
   (setq doors   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door* "*")))
-  (setq fills   (mapcar 'mk:collect-fill fills))
-  (setq windows (mapcar 'mk:collect-window windows))
-  (setq doors   (mapcar 'mk:collect-door doors))
+  (setq fills   (mk:sanitize-panels (mapcar 'mk:collect-fill fills)     "Заполнения"))
+  (setq windows (mk:sanitize-panels (mapcar 'mk:collect-window windows) "Окна"))
+  (setq doors   (mk:sanitize-panels (mapcar 'mk:collect-door doors)     "Двери"))
   (prompt (strcat "\n  Стойки: " (itoa (length posts))))
   (prompt (strcat "\n  Ригели: " (itoa (length beams))))
   (prompt (strcat "\n  Заполнения: " (itoa (length fills))))
