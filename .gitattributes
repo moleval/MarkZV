@@ -1,0 +1,3 @@
+*.lsp text working-tree-encoding=CP1251 eol=CRLF
+*.md text eol=lf
+*.py text eol=lf

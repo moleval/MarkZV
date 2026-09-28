@@ -84,6 +84,9 @@
 ;;;=====================================================================
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
+(setq *mk:rev*            "r2")
+(setq *mk:build*          "2026-09-28.b2")
+
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
 (setq *mk:block-door*     "Дверной блок КПТ74 двухстворчатый")
@@ -131,6 +134,32 @@
 ;;; 2. УТИЛИТЫ
 ;;;=====================================================================
 (defun mk:strp (x) (and x (eq (type x) 'STR)))
+
+;; Обновление поля записи: замена через subst, а не append.
+;; (append …) добавлял бы ВТОРУЮ пару с тем же ключом, а assoc
+;; всегда возвращает первую — значение молча не менялось.
+(defun mk:rec-put (rec key val / old)
+  (setq old (assoc key rec))
+  (if old
+    (subst (cons key val) old rec)
+    (append rec (list (cons key val)))))
+
+(defun mk:rec-get (rec key)
+  (cdr (assoc key rec)))
+
+;; Накопление групп: (ключ (элементы …)) с сохранением порядка
+(defun mk:group-add (groups key el / grp)
+  (setq grp (assoc key groups))
+  (if grp
+    (subst (list key (cons el (cadr grp))) grp groups)
+    (cons (list key (list el)) groups)))
+
+;; Финализация: порядок групп и элементов внутри групп — как на чертеже
+(defun mk:groups-finish (groups / out grp)
+  (setq out nil)
+  (foreach grp groups
+    (setq out (cons (list (car grp) (reverse (cadr grp))) out)))
+  out)
 
 (defun mk:numval (x)
   (cond ((numberp x) (float x))
@@ -623,7 +652,7 @@
       (if (> (+ new-y h) (+ max-y *mk:tol-skew*))
         (progn (setq new-y (- new-y h))
                (prompt (strcat "\n  [WARN] Панель за верхней границей: " (rtos new-y 2 1)))))
-      (setq panel (append panel (list (cons 'INS_PT (list new-x new-y 0.0)))))))
+      (setq panel (mk:rec-put panel 'INS_PT (list new-x new-y 0.0)))))
   panel)
 
 ;;;=====================================================================
@@ -714,9 +743,9 @@
                 (> (+ y len) (+ max-y *mk:tol-skew*)))
           (progn
             (prompt (strcat "\n  [INFO] Выступающая стойка: " (rtos x 2 1) "," (rtos y 2 1)))
-            (setq post (append post (list (cons 'PROTRUDING t))))
+            (setq post (mk:rec-put post 'PROTRUDING t))
             (setq protruding-count (1+ protruding-count)))
-          (setq post (append post (list (cons 'PROTRUDING nil)))))
+          (setq post (mk:rec-put post 'PROTRUDING nil)))
         (setq new-posts (cons post new-posts)))
       (setq new-posts (cons post new-posts))))
   (list (reverse new-posts) protruding-count))
@@ -890,36 +919,32 @@
   (setq new-fills nil)
   (foreach panel fills
     (setq panel (mk:normalize-panel panel bounds))
-    (setq panel (append panel (list (cons 'CONN_POSTS (mk:find-connected-posts panel posts)))))
+    (setq panel (mk:rec-put panel 'CONN_POSTS (mk:find-connected-posts panel posts)))
     (setq new-fills (cons panel new-fills)))
   (setq fills (reverse new-fills))
   (setq new-windows nil)
   (foreach panel windows
     (setq panel (mk:normalize-panel panel bounds))
-    (setq panel (append panel (list (cons 'CONN_POSTS (mk:find-connected-posts panel posts)))))
+    (setq panel (mk:rec-put panel 'CONN_POSTS (mk:find-connected-posts panel posts)))
     (setq new-windows (cons panel new-windows)))
   (setq windows (reverse new-windows))
   (setq new-doors nil)
   (foreach panel doors
     (setq panel (mk:normalize-panel panel bounds))
-    (setq panel (append panel (list (cons 'CONN_POSTS (mk:find-connected-posts panel posts)))))
+    (setq panel (mk:rec-put panel 'CONN_POSTS (mk:find-connected-posts panel posts)))
     (setq new-doors (cons panel new-doors)))
   (setq doors (reverse new-doors))
   (setq all-panels (append fills windows doors))
   (setq new-posts nil)
   (foreach post posts
-    (setq post (append post
-      (list
-        (cons 'LEFT_CONN (mk:find-left-elements post all-panels beams))
-        (cons 'RIGHT_CONN (mk:find-right-elements post all-panels beams)))))
+    (setq post (mk:rec-put post 'LEFT_CONN  (mk:find-left-elements post all-panels beams)))
+    (setq post (mk:rec-put post 'RIGHT_CONN (mk:find-right-elements post all-panels beams)))
     (setq new-posts (cons post new-posts)))
   (setq posts (reverse new-posts))
   (setq new-beams nil)
   (foreach beam beams
-    (setq beam (append beam
-      (list
-        (cons 'TOP_ELEM (mk:find-top-element beam all-panels))
-        (cons 'BOT_ELEM (mk:find-bot-element beam all-panels)))))
+    (setq beam (mk:rec-put beam 'TOP_ELEM (mk:find-top-element beam all-panels)))
+    (setq beam (mk:rec-put beam 'BOT_ELEM (mk:find-bot-element beam all-panels)))
     (setq new-beams (cons beam new-beams)))
   (setq beams (reverse new-beams))
   (list posts beams fills windows doors))
@@ -1191,46 +1216,39 @@
     (if (and sub (not done)) (setq sub (entnext sub))))
   done)
 
-(defun mk:group-by-size-profile (elements / groups key found)
+;; Ключ размера с допуском *mk:tol-size* (0.5 мм):
+;; 1500.4 и 1500.6 должны попадать в одну группу.
+(defun mk:size-key (v / step)
+  (if (numberp v)
+    (progn
+      (setq step (* 2.0 *mk:tol-size*))
+      (rtos (* step (fix (+ (/ (float v) step) 0.5))) 2 1))
+    "0"))
+
+(defun mk:group-by-size-profile (elements / groups key)
   (setq groups nil)
   (foreach el elements
     (setq key (strcat
-      (if (cdr (assoc 'LENGTH el))
-        (rtos (cdr (assoc 'LENGTH el)) 2 0) "0")
+      (mk:size-key (mk:rec-get el 'LENGTH))
       "_"
-      (if (cdr (assoc 'PROFILE el))
-        (cdr (assoc 'PROFILE el)) "БЕЗ_ПРОФИЛЯ")))
-    (setq found nil)
-    (foreach grp groups
-      (if (and (null found) (= (car grp) key))
-        (progn
-          (setq grp (list (car grp) (cons el (cadr grp))))
-          (setq found t))))
-    (if (not found)
-      (setq groups (cons (list key (list el)) groups))))
-  groups)
+      (if (mk:rec-get el 'PROFILE)
+        (mk:rec-get el 'PROFILE) "БЕЗ_ПРОФИЛЯ")))
+    (setq groups (mk:group-add groups key el)))
+  (mk:groups-finish groups))
 
-(defun mk:group-beams (beams / groups key found)
+(defun mk:group-beams (beams / groups key)
   (setq groups nil)
   (foreach beam beams
     (setq key (strcat
-      (if (cdr (assoc 'LENGTH beam))
-        (rtos (cdr (assoc 'LENGTH beam)) 2 0) "0")
+      (mk:size-key (mk:rec-get beam 'LENGTH))
       "_"
-      (if (cdr (assoc 'PROFILE beam))
-        (cdr (assoc 'PROFILE beam)) "БЕЗ_ПРОФИЛЯ")
+      (if (mk:rec-get beam 'PROFILE)
+        (mk:rec-get beam 'PROFILE) "БЕЗ_ПРОФИЛЯ")
       "_"
-      (if (cdr (assoc 'SUFFIX beam))
-        (cdr (assoc 'SUFFIX beam)) "БЕЗ_СУФФИКСА")))
-    (setq found nil)
-    (foreach grp groups
-      (if (and (null found) (= (car grp) key))
-        (progn
-          (setq grp (list (car grp) (cons beam (cadr grp))))
-          (setq found t))))
-    (if (not found)
-      (setq groups (cons (list key (list beam)) groups))))
-  groups)
+      (if (mk:rec-get beam 'SUFFIX)
+        (mk:rec-get beam 'SUFFIX) "БЕЗ_СУФФИКСА")))
+    (setq groups (mk:group-add groups key beam)))
+  (mk:groups-finish groups))
 
 (defun mk:get-beam-suffix (beam all-panels doors bounds /
                            top-elem bot-elem top-type bot-type
@@ -1273,86 +1291,109 @@
                 (setq suffix (strcat suffix *mk:suffix-threshold*)))))))))
   suffix)
 
-(defun c:МАРКАЗАПОЛН-СТ (/ posts prefix groups idx mark-str count skip-count)
+;; Одна выборка чертежа на команду (раньше был ssget "_X" на каждый тип блока)
+(defun mk:ss-all-inserts ()
+  (ssget "_X" (list (cons 0 "INSERT"))))
+
+(defun mk:undo-begin (/ doc)
+  (setq doc (mk:ax-get (vlax-get-acad-object) "ActiveDocument"))
+  (if doc (vl-catch-all-apply 'vlax-invoke-method (list doc "StartUndoMark")))
+  doc)
+
+(defun mk:undo-end (doc)
+  (if doc (vl-catch-all-apply 'vlax-invoke-method (list doc "EndUndoMark")))
+  nil)
+
+;; Запись марки по группе; возвращает (записано пропущено)
+(defun mk:write-marks (elements mark-str / count skip-count e)
+  (setq count 0 skip-count 0)
+  (foreach el elements
+    (setq e (mk:rec-get el 'ENAME))
+    (if (and e (mk:has-attr? e *mk:attr-mark*))
+      (progn
+        (mk:set-attr e *mk:attr-mark* mark-str)
+        (setq count (1+ count)))
+      (setq skip-count (1+ skip-count))))
+  (list count skip-count))
+
+(defun c:МАРКАЗАПОЛН-СТ (/ ss posts prefix groups idx mark-str
+                           count skip-count res doc)
   (prompt "\n[МАРКАЗАПОЛН-СТ] Автозаполнение атрибутов стоек...")
   (setq prefix (mk:get-vitrage-prefix))
   (prompt (strcat "\n  Префикс витража: " prefix))
-  (setq posts (mk:find-blocks-in-ss (ssget "_X" (list (cons 0 "INSERT"))) (strcat "*" *mk:block-post* "*")))
+  (setq ss    (mk:ss-all-inserts))
+  (setq posts (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
   (if (null posts)
-    (progn (prompt "\n  [INFO] Блоки стоек не найдены.") (princ) (exit)))
-  (setq posts (mapcar 'mk:collect-post posts))
-  (prompt (strcat "\n  Найдено стоек: " (itoa (length posts))))
-  (setq groups (mk:group-by-size-profile posts))
-  (prompt (strcat "\n  Уникальных групп: " (itoa (length groups))))
-  (setq idx 1 count 0 skip-count 0)
-  (foreach grp groups
-    (setq mark-str (strcat prefix " Ст" (itoa idx)))
-    (foreach post (cadr grp)
-      (if (and (cdr (assoc 'ENAME post))
-               (mk:has-attr? (cdr (assoc 'ENAME post)) *mk:attr-mark*))
-        (progn
-          (mk:set-attr (cdr (assoc 'ENAME post)) *mk:attr-mark* mark-str)
-          (prompt (strcat "\n  Записано: " mark-str))
-          (setq count (1+ count)))
-        (progn
-          (prompt "\n  [SKIP] Атрибут Марка не найден.")
-          (setq skip-count (1+ skip-count)))))
-    (setq idx (1+ idx)))
-  (prompt (strcat "\n[ГОТОВО] Заполнено: " (itoa count) ", Пропущено: " (itoa skip-count)))
+    (prompt "\n  [INFO] Блоки стоек не найдены.")
+    (progn
+      (setq posts (mapcar 'mk:collect-post posts))
+      (prompt (strcat "\n  Найдено стоек: " (itoa (length posts))))
+      (setq groups (mk:group-by-size-profile posts))
+      (prompt (strcat "\n  Уникальных групп: " (itoa (length groups))))
+      (setq idx 1 count 0 skip-count 0)
+      (setq doc (mk:undo-begin))
+      (foreach grp groups
+        (setq mark-str (strcat prefix " Ст" (itoa idx)))
+        (setq res (mk:write-marks (cadr grp) mark-str))
+        (prompt (strcat "\n  " mark-str " — шт.: " (itoa (car res))))
+        (setq count      (+ count (car res))
+              skip-count (+ skip-count (cadr res))
+              idx        (1+ idx)))
+      (mk:undo-end doc)
+      (prompt (strcat "\n[ГОТОВО] Заполнено: " (itoa count)
+                      ", Пропущено: " (itoa skip-count)))))
   (princ))
 
-(defun c:МАРКАЗАПОЛН-РГ (/ beams fills windows doors posts all-panels
-                          prefix groups idx mark-str suffix count skip-count
-                          bounds new-beams beam first-beam)
+(defun c:МАРКАЗАПОЛН-РГ (/ ss beams fills windows doors posts all-panels
+                           prefix groups idx mark-str suffix count skip-count
+                           bounds new-beams beam first-beam res doc)
   (prompt "\n[МАРКАЗАПОЛН-РГ] Автозаполнение атрибутов ригелей...")
   (setq prefix (mk:get-vitrage-prefix))
   (prompt (strcat "\n  Префикс витража: " prefix))
-  (setq posts   (mk:find-blocks-in-ss (ssget "_X" (list (cons 0 "INSERT"))) (strcat "*" *mk:block-post* "*")))
-  (setq beams   (mk:find-blocks-in-ss (ssget "_X" (list (cons 0 "INSERT"))) (strcat "*" *mk:block-beam* "*")))
-  (setq fills   (mk:find-blocks-in-ss (ssget "_X" (list (cons 0 "INSERT"))) (strcat "*" *mk:block-fill* "*")))
-  (setq windows (mk:find-blocks-in-ss (ssget "_X" (list (cons 0 "INSERT"))) (strcat "*" *mk:block-window* "*")))
-  (setq doors   (mk:find-blocks-in-ss (ssget "_X" (list (cons 0 "INSERT"))) (strcat "*" *mk:block-door* "*")))
+  (setq ss      (mk:ss-all-inserts))
+  (setq posts   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
+  (setq beams   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*")))
+  (setq fills   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
+  (setq windows (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*")))
+  (setq doors   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door* "*")))
   (if (null beams)
-    (progn (prompt "\n  [INFO] Блоки ригелей не найдены.") (princ) (exit)))
-  (setq posts   (mapcar 'mk:collect-post posts))
-  (setq beams   (mapcar 'mk:collect-beam beams))
-  (setq fills   (mapcar 'mk:collect-fill fills))
-  (setq windows (mapcar 'mk:collect-window windows))
-  (setq doors   (mapcar 'mk:collect-door doors))
-  (setq all-panels (append fills windows doors))
-  (setq bounds (mk:find-vitrage-bounds posts beams))
-  (prompt "\n  Построение топологии для суффиксов...")
-  (setq new-beams nil)
-  (foreach beam beams
-    (setq beam (append beam
-      (list
-        (cons 'TOP_ELEM (mk:find-top-element beam all-panels))
-        (cons 'BOT_ELEM (mk:find-bot-element beam all-panels)))))
-    (setq suffix (mk:get-beam-suffix beam all-panels doors bounds))
-    (setq beam (append beam (list (cons 'SUFFIX suffix))))
-    (setq new-beams (cons beam new-beams)))
-  (setq beams (reverse new-beams))
-  (setq groups (mk:group-beams beams))
-  (prompt (strcat "\n  Уникальных групп: " (itoa (length groups))))
-  (setq idx 1 count 0 skip-count 0)
-  (foreach grp groups
-    (setq first-beam (car (cadr grp)))
-    (setq suffix (if (cdr (assoc 'SUFFIX first-beam)) (cdr (assoc 'SUFFIX first-beam)) ""))
-    (if (and suffix (> (strlen suffix) 0))
-      (setq mark-str (strcat prefix " Рг" (itoa idx) suffix))
-      (setq mark-str (strcat prefix " Рг" (itoa idx))))
-    (foreach beam (cadr grp)
-      (if (and (cdr (assoc 'ENAME beam))
-               (mk:has-attr? (cdr (assoc 'ENAME beam)) *mk:attr-mark*))
-        (progn
-          (mk:set-attr (cdr (assoc 'ENAME beam)) *mk:attr-mark* mark-str)
-          (prompt (strcat "\n  Записано: " mark-str))
-          (setq count (1+ count)))
-        (progn
-          (prompt "\n  [SKIP] Атрибут Марка не найден.")
-          (setq skip-count (1+ skip-count)))))
-    (setq idx (1+ idx)))
-  (prompt (strcat "\n[ГОТОВО] Заполнено: " (itoa count) ", Пропущено: " (itoa skip-count)))
+    (prompt "\n  [INFO] Блоки ригелей не найдены.")
+    (progn
+      (setq posts   (mapcar 'mk:collect-post posts))
+      (setq beams   (mapcar 'mk:collect-beam beams))
+      (setq fills   (mapcar 'mk:collect-fill fills))
+      (setq windows (mapcar 'mk:collect-window windows))
+      (setq doors   (mapcar 'mk:collect-door doors))
+      (setq all-panels (append fills windows doors))
+      (setq bounds (mk:find-vitrage-bounds posts beams))
+      (prompt "\n  Построение топологии для суффиксов...")
+      (setq new-beams nil)
+      (foreach beam beams
+        (setq beam (mk:rec-put beam 'TOP_ELEM (mk:find-top-element beam all-panels)))
+        (setq beam (mk:rec-put beam 'BOT_ELEM (mk:find-bot-element beam all-panels)))
+        (setq suffix (mk:get-beam-suffix beam all-panels doors bounds))
+        (setq beam (mk:rec-put beam 'SUFFIX suffix))
+        (setq new-beams (cons beam new-beams)))
+      (setq beams (reverse new-beams))
+      (setq groups (mk:group-beams beams))
+      (prompt (strcat "\n  Уникальных групп: " (itoa (length groups))))
+      (setq idx 1 count 0 skip-count 0)
+      (setq doc (mk:undo-begin))
+      (foreach grp groups
+        (setq first-beam (car (cadr grp)))
+        (setq suffix (if (mk:rec-get first-beam 'SUFFIX)
+                       (mk:rec-get first-beam 'SUFFIX) ""))
+        (if (and suffix (> (strlen suffix) 0))
+          (setq mark-str (strcat prefix " Рг" (itoa idx) suffix))
+          (setq mark-str (strcat prefix " Рг" (itoa idx))))
+        (setq res (mk:write-marks (cadr grp) mark-str))
+        (prompt (strcat "\n  " mark-str " — шт.: " (itoa (car res))))
+        (setq count      (+ count (car res))
+              skip-count (+ skip-count (cadr res))
+              idx        (1+ idx)))
+      (mk:undo-end doc)
+      (prompt (strcat "\n[ГОТОВО] Заполнено: " (itoa count)
+                      ", Пропущено: " (itoa skip-count)))))
   (princ))
 
 ;;;=====================================================================
@@ -1366,7 +1407,8 @@
   (prompt "\nВыберите элементы витража (рамкой): ")
   (setq ss (ssget))
   (if (null ss)
-    (progn (prompt "\n[INFO] Ничего не выбрано.") (princ) (exit)))
+    (prompt "\n[INFO] Ничего не выбрано."))
+  (if ss (progn
   (prompt (strcat "\n  Выбрано объектов: " (itoa (sslength ss))))
   (prompt "\n[1/8] Чтение блока Атрибуты витража...")
   (setq vitrage (mk:read-vitrage-block))
@@ -1451,6 +1493,7 @@
   (prompt (strcat "\n  Элементов вне сетки: " (itoa out-count)))
   (prompt (strcat "\n  Выступающих стоек: " (itoa protruding-count)))
   (prompt "\n[ГОТОВО] Сбор данных завершён.")
+  ))                                    ; конец (if ss (progn …
   (princ))
 
 ;;;=====================================================================
@@ -1478,7 +1521,7 @@
 ;;;=====================================================================
 ;;; 21. ИНИЦИАЛИЗАЦИЯ С АВТОПРОВЕРКОЙ
 ;;;=====================================================================
-(prompt "\n[MarkZV] Загружен.")
+(prompt (strcat "\n[MarkZV] Загружен " *mk:rev* " build " *mk:build* "."))
 (prompt "\n  Команды:")
 (prompt "\n    МАРКАСБОР       - Сбор данных и построение 2D модели")
 (prompt "\n    МАРКАМОДЕЛЬ     - Тестовая отрисовка модели")

@@ -1,7 +1,8 @@
 # MarkZV — сбор данных, 2D-модель витража и марки стоек/ригелей
 
 **Файл модуля:** [`MarkZV.lsp`](MarkZV.lsp) → копировать как `D:\MarkZV.lsp`
-**Кодировка:** UTF-8 (см. замечание в [REUSE_MARKZ.md](REUSE_MARKZ.md) §5)
+**Редакция:** `r2` · build `2026-09-28.b2`
+**Кодировка рабочего файла:** CP1251 + CRLF, как в поставке MARKZ.lsp (в Git хранится как UTF-8 через `.gitattributes` / `working-tree-encoding`, поэтому diff на GitHub читаемый, а выгруженный файл — CP1251)
 **Смежный проект:** [moleval/MarkZ](https://github.com/moleval/MarkZ) — маркировка заполнений, рядовка, ведомость
 
 ## Установка
@@ -36,6 +37,15 @@
 ```bash
 python3 tools/check_parens.py MarkZV.lsp   # аналог TEST 00 / MK_CHECK без AutoCAD
 ```
+
+## Изменения относительно первой редакции
+
+- Восстановлена пропущенная `)` в `mk:extract-posts-beams-from-mlines` (файл не загружался).
+- **B2:** `mk:group-by-size-profile` / `mk:group-beams` — группы копились в переменной цикла, в группу попадал только первый элемент, остальные стойки/ригели оставались без «Марки». Переписано на `assoc` + `subst` (`mk:group-add`), ключ размера — с допуском `*mk:tol-size*` 0.5 мм.
+- **B3:** обновление полей записей шло через `append`, а `assoc` возвращал старое значение — не работали `INS_PT` после нормализации, `PROTRUDING`, `LEFT_CONN`/`RIGHT_CONN`, `TOP_ELEM`/`BOT_ELEM`, `SUFFIX`. Введён `mk:rec-put` (замена через `subst`).
+- **B4:** убраны `(exit)` — команды завершаются штатно, без «quit / exit abort».
+- **B5:** одна выборка `ssget "_X"` на команду вместо пяти; запись марок — в одной транзакции `StartUndoMark`/`EndUndoMark` (откат одним `_U`).
+- Добавлены `*mk:rev*` / `*mk:build*` и версия в баннере загрузки.
 
 ## Документы
 

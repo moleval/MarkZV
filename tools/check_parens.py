@@ -49,11 +49,22 @@ def scan(text):
     return depth, in_str, extra_line, line
 
 
+def read_lsp(path):
+    """Файлы .lsp в проекте — CP1251 (как в поставке MARKZ.lsp); UTF-8 тоже читаем."""
+    data = path.read_bytes()
+    for enc in ("utf-8", "cp1251"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("cp1251", errors="replace")
+
+
 def main(argv):
     paths = argv[1:] or ["MarkZV.lsp"]
     rc = 0
     for p in paths:
-        text = Path(p).read_text(encoding="utf-8")
+        text = read_lsp(Path(p))
         depth, in_str, extra_line, lines = scan(text)
         if extra_line is not None:
             print(f"{p}: ERROR лишняя ')' на строке {extra_line}")
