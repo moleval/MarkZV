@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "1.2")
+(setq *mk:ver*            "1.3")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -142,6 +142,13 @@
 (setq *mk:suffix-warm-cold*     "тх")
 (setq *mk:suffix-cold-warm*     "хт")
 (setq *mk:suffix-mirror*        "зерк")
+(setq *mk:suffix-small*         "м")     ; малый профиль
+(setq *mk:suffix-big*           "б")     ; большой профиль
+;; Ручная таблица артикул -> "м"/"б" (приоритет над автоопределением по габариту).
+;; Заполняется из базы СИАЛ: (("КП45551" . "м") ("КП45364" . "б"))
+(setq *mk:article-size*         nil)
+(setq *mk:group-model*          "MK_MODEL")
+(setq *mk:group-test*           "MK_TEST_MODEL")
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -589,6 +596,7 @@
     (cons 'XSCALE     (cdr (assoc 'XSCALE geom)))
     (cons 'LENGTH     (car dl))
     (cons 'SIZE_SRC   (cadr dl))
+    (cons 'CROSS      (mk:bb-w (mk:e-bb obj)))
     (cons 'ARTICLE    (mk:get-attr ename *mk:attr-article*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'LEFT_CONN  nil)
@@ -608,6 +616,7 @@
     (cons 'ROTATION   (cdr (assoc 'ROTATION geom)))
     (cons 'LENGTH     (car dl))
     (cons 'SIZE_SRC   (cadr dl))
+    (cons 'CROSS      (mk:bb-h (mk:e-bb obj)))
     (cons 'ARTICLE    (mk:get-attr ename *mk:attr-article*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'TOP_ELEM   nil)
@@ -929,11 +938,19 @@
           (setq right-list (cons beam right-list))))))
   (reverse right-list))
 
+;; Панель считается примыкающей, только если она перекрывается с ригелем по X
+(defun mk:beam-panel-overlap? (beam panel / br pr)
+  (setq br (mk:el-xrange beam)
+        pr (mk:el-xrange panel))
+  (and (< (car br) (- (cadr pr) *mk:tol-adjacency*))
+       (> (cadr br) (+ (car pr) *mk:tol-adjacency*))))
+
 (defun mk:find-top-element (beam panels / beam-y top-elem best-dist dist panel-y)
   (setq beam-y (cadr (cdr (assoc 'INS_PT beam)))
         top-elem nil best-dist nil)
   (foreach panel panels
-    (if (cdr (assoc 'INS_PT panel))
+    (if (and (cdr (assoc 'INS_PT panel))
+             (mk:beam-panel-overlap? beam panel))
       (progn
         (setq panel-y (cadr (cdr (assoc 'INS_PT panel))))
         (if (> panel-y beam-y)
@@ -949,7 +966,8 @@
   (setq beam-y (cadr (cdr (assoc 'INS_PT beam)))
         bot-elem nil best-dist nil)
   (foreach panel panels
-    (if (cdr (assoc 'INS_PT panel))
+    (if (and (cdr (assoc 'INS_PT panel))
+             (mk:beam-panel-overlap? beam panel))
       (progn
         (setq panel-y (cadr (cdr (assoc 'INS_PT panel)))
               panel-h (if (cdr (assoc 'HEIGHT panel)) (cdr (assoc 'HEIGHT panel)) 0.0))
@@ -1002,16 +1020,54 @@
 ;;;=====================================================================
 ;;; 15. ВИЗУАЛИЗАЦИЯ (БАЗОВАЯ)
 ;;;=====================================================================
+;; Все создаваемые объекты копятся, чтобы собрать их в группу
+(setq *mk:drawn* nil)
+
+(defun mk:emk (dxf / e)
+  (setq e (entmakex dxf))
+  (if e (setq *mk:drawn* (cons e *mk:drawn*)))
+  e)
+
+;; Группа объектов модели — чтобы можно было удалить одним выбором
+;; (донор: mark:ar-make-group из MarkZ)
+(defun mk:make-group (name enames / doc groups old grp arr i n)
+  (if (and enames (> (length enames) 1))
+    (progn
+      (setq doc    (mk:ax-get (vlax-get-acad-object) "ActiveDocument")
+            groups (if doc (mk:ax-get doc "Groups") nil))
+      (if (null groups)
+        (prompt "\n  [WARN] Коллекция Groups недоступна — группа не создана.")
+        (progn
+          (setq old (vl-catch-all-apply 'vlax-invoke-method
+                      (list groups "Item" name)))
+          (if (and old (not (vl-catch-all-error-p old)))
+            (vl-catch-all-apply 'vlax-invoke-method (list old "Delete")))
+          (setq grp (vl-catch-all-apply 'vlax-invoke-method
+                      (list groups "Add" name)))
+          (if (or (vl-catch-all-error-p grp) (null grp))
+            (prompt (strcat "\n  [WARN] Группа \"" name "\" не создана."))
+            (progn
+              (setq n   (length enames)
+                    arr (vlax-make-safearray vlax-vbObject (cons 0 (1- n)))
+                    i   0)
+              (foreach e enames
+                (vlax-safearray-put-element arr i (vlax-ename->vla-object e))
+                (setq i (1+ i)))
+              (vl-catch-all-apply 'vlax-invoke-method
+                (list grp "AppendItems" arr))
+              (prompt (strcat "\n[OK] Группа \"" name "\": "
+                              (itoa n) " объект(ов)"))))))))
+  nil)
 (defun mk:draw-post (post / pt len)
   (setq pt  (cdr (assoc 'INS_PT post))
         len (if (cdr (assoc 'LENGTH post)) (cdr (assoc 'LENGTH post)) 0.0))
   (if pt
     (progn
-      (entmakex (list '(0 . "LINE")
+      (mk:emk (list '(0 . "LINE")
                       (cons 10 (list (car pt) (cadr pt) 0.0))
                       (cons 11 (list (car pt) (+ (cadr pt) len) 0.0))
                       '(62 . 1)))
-      (entmakex (list '(0 . "POINT")
+      (mk:emk (list '(0 . "POINT")
                       (cons 10 (list (car pt) (cadr pt) 0.0))
                       '(62 . 2))))))
 
@@ -1019,7 +1075,7 @@
   (setq pt  (cdr (assoc 'INS_PT beam))
         len (if (cdr (assoc 'LENGTH beam)) (cdr (assoc 'LENGTH beam)) 0.0))
   (if pt
-    (entmakex (list '(0 . "LINE")
+    (mk:emk (list '(0 . "LINE")
                     (cons 10 (list (car pt) (cadr pt) 0.0))
                     (cons 11 (list (+ (car pt) len) (cadr pt) 0.0))
                     '(62 . 3)))))
@@ -1029,7 +1085,7 @@
         h  (if (cdr (assoc 'HEIGHT panel)) (cdr (assoc 'HEIGHT panel)) 0.0)
         w  (if (cdr (assoc 'WIDTH panel)) (cdr (assoc 'WIDTH panel)) 0.0))
   (if (and pt (> h 0) (> w 0))
-    (entmakex (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 5)
+    (mk:emk (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 5)
                     (cons 10 (list (car pt) (cadr pt)))
                     (cons 10 (list (+ (car pt) w) (cadr pt)))
                     (cons 10 (list (+ (car pt) w) (+ (cadr pt) h)))
@@ -1040,7 +1096,7 @@
         max-x (cdr (assoc 'MAX_X bounds))
         min-y (cdr (assoc 'MIN_Y bounds))
         max-y (cdr (assoc 'MAX_Y bounds)))
-  (entmakex (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 2)
+  (mk:emk (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 2)
                   (cons 10 (list min-x min-y))
                   (cons 10 (list max-x min-y))
                   (cons 10 (list max-x max-y))
@@ -1048,6 +1104,7 @@
 
 (defun mk:draw-model (posts beams fills windows doors bounds / layer prev-layer)
   (setq layer "MK_MODEL")
+  (setq *mk:drawn* nil)
   (if (null (tblsearch "LAYER" layer))
     (command "_.LAYER" "_N" layer "_C" "7" layer ""))
   (setq prev-layer (getvar "CLAYER"))
@@ -1057,7 +1114,8 @@
   (foreach beam beams (mk:draw-beam beam))
   (foreach panel (append fills windows doors) (mk:draw-panel panel))
   (setvar "CLAYER" prev-layer)
-  (prompt (strcat "\n[OK] 2D модель отрисована на слое: " layer)))
+  (prompt (strcat "\n[OK] 2D модель отрисована на слое: " layer))
+  (mk:make-group *mk:group-model* (reverse *mk:drawn*)))
 
 ;;;=====================================================================
 ;;; 16. ТЕСТОВАЯ ВИЗУАЛИЗАЦИЯ
@@ -1070,16 +1128,16 @@
     (progn
       (setq x1 (car pt) y1 (cadr pt)
             x2 (+ (car pt) w) y2 (+ (cadr pt) h))
-      (entmakex (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 5)
+      (mk:emk (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 5)
                       (cons 10 (list x1 y1))
                       (cons 10 (list x2 y1))
                       (cons 10 (list x2 y2))
                       (cons 10 (list x1 y2))))
-      (entmakex (list '(0 . "LINE")
+      (mk:emk (list '(0 . "LINE")
                       (cons 10 (list x1 y1 0.0))
                       (cons 11 (list x2 y2 0.0))
                       '(62 . 5)))
-      (entmakex (list '(0 . "LINE")
+      (mk:emk (list '(0 . "LINE")
                       (cons 10 (list x2 y1 0.0))
                       (cons 11 (list x1 y2 0.0))
                       '(62 . 5))))))
@@ -1094,18 +1152,18 @@
       (setq x1 (car pt) y1 (cadr pt)
             x2 (+ (car pt) w) y2 (+ (cadr pt) h)
             cx (/ (+ x1 x2) 2.0) cy (/ (+ y1 y2) 2.0))
-      (entmakex (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 4)
+      (mk:emk (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 4)
                       (cons 10 (list x1 y1))
                       (cons 10 (list x2 y1))
                       (cons 10 (list x2 y2))
                       (cons 10 (list x1 y2))))
-      (entmakex (list '(0 . "TEXT")
+      (mk:emk (list '(0 . "TEXT")
                       (cons 10 (list cx cy 0.0))
                       (cons 40 100.0) (cons 1 "ОКНО")
                       (cons 72 1) (cons 11 (list cx cy 0.0))
                       '(62 . 4)))
       (if (and name (mk:strp name))
-        (entmakex (list '(0 . "TEXT")
+        (mk:emk (list '(0 . "TEXT")
                         (cons 10 (list cx (- cy 120.0) 0.0))
                         (cons 40 80.0) (cons 1 name)
                         (cons 72 1) (cons 11 (list cx (- cy 120.0) 0.0))
@@ -1121,18 +1179,18 @@
       (setq x1 (car pt) y1 (cadr pt)
             x2 (+ (car pt) w) y2 (+ (cadr pt) h)
             cx (/ (+ x1 x2) 2.0) cy (/ (+ y1 y2) 2.0))
-      (entmakex (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 6)
+      (mk:emk (list '(0 . "LWPOLYLINE") '(90 . 4) '(70 . 1) '(62 . 6)
                       (cons 10 (list x1 y1))
                       (cons 10 (list x2 y1))
                       (cons 10 (list x2 y2))
                       (cons 10 (list x1 y2))))
-      (entmakex (list '(0 . "TEXT")
+      (mk:emk (list '(0 . "TEXT")
                       (cons 10 (list cx cy 0.0))
                       (cons 40 100.0) (cons 1 "ДВЕРЬ")
                       (cons 72 1) (cons 11 (list cx cy 0.0))
                       '(62 . 6)))
       (if (and name (mk:strp name))
-        (entmakex (list '(0 . "TEXT")
+        (mk:emk (list '(0 . "TEXT")
                         (cons 10 (list cx (- cy 120.0) 0.0))
                         (cons 40 80.0) (cons 1 name)
                         (cons 72 1) (cons 11 (list cx (- cy 120.0) 0.0))
@@ -1145,28 +1203,29 @@
     (if pt
       (progn
         (if (cdr (assoc 'PROTRUDING post))
-          (entmakex (list '(0 . "LINE")
+          (mk:emk (list '(0 . "LINE")
                           (cons 10 (list (car pt) (cadr pt) 0.0))
                           (cons 11 (list (car pt) (+ (cadr pt) len) 0.0))
                           '(62 . 1) (cons 6 "DASHED")))
-          (entmakex (list '(0 . "LINE")
+          (mk:emk (list '(0 . "LINE")
                           (cons 10 (list (car pt) (cadr pt) 0.0))
                           (cons 11 (list (car pt) (+ (cadr pt) len) 0.0))
                           '(62 . 1))))
-        (entmakex (list '(0 . "POINT")
+        (mk:emk (list '(0 . "POINT")
                         (cons 10 (list (car pt) (cadr pt) 0.0))
                         '(62 . 2))))))
   (foreach beam beams
     (setq pt  (cdr (assoc 'INS_PT beam))
           len (if (cdr (assoc 'LENGTH beam)) (cdr (assoc 'LENGTH beam)) 0.0))
     (if pt
-      (entmakex (list '(0 . "LINE")
+      (mk:emk (list '(0 . "LINE")
                       (cons 10 (list (car pt) (cadr pt) 0.0))
                       (cons 11 (list (+ (car pt) len) (cadr pt) 0.0))
                       '(62 . 3))))))
 
 (defun mk:draw-test-model (posts beams fills windows doors bounds / layer prev-layer)
   (setq layer "MK_TEST_MODEL")
+  (setq *mk:drawn* nil)
   (if (null (tblsearch "LAYER" layer))
     (command "_.LAYER" "_N" layer "_C" "7" layer ""))
   (setq prev-layer (getvar "CLAYER"))
@@ -1177,7 +1236,8 @@
   (foreach win windows (mk:draw-window-label win))
   (foreach door doors (mk:draw-door-label door))
   (setvar "CLAYER" prev-layer)
-  (prompt (strcat "\n[OK] Тестовая модель отрисована на слое: " layer)))
+  (prompt (strcat "\n[OK] Тестовая модель отрисована на слое: " layer))
+  (mk:make-group *mk:group-test* (reverse *mk:drawn*)))
 
 ;;;=====================================================================
 ;;; 17. ВЫВОД ДАННЫХ В ФАЙЛ
@@ -1213,6 +1273,7 @@
         (write-line (strcat "  PROTRUDING: " (if (cdr (assoc 'PROTRUDING post)) "ДА" "НЕТ")) f)
         (write-line (strcat "  СЛЕВА:  " (if (cdr (assoc 'LEFT_TYPES post))  (cdr (assoc 'LEFT_TYPES post))  "?")) f)
         (write-line (strcat "  СПРАВА: " (if (cdr (assoc 'RIGHT_TYPES post)) (cdr (assoc 'RIGHT_TYPES post)) "?")) f)
+        (write-line (strcat "  СЕЧЕНИЕ: " (vl-prin1-to-string (cdr (assoc 'CROSS post)))) f)
         (write-line (strcat "  LEFT_CONN: " (itoa (length (cdr (assoc 'LEFT_CONN post))))) f)
         (write-line (strcat "  RIGHT_CONN: " (itoa (length (cdr (assoc 'RIGHT_CONN post))))) f)
         (write-line "" f))
@@ -1227,6 +1288,12 @@
         (write-line (strcat "  СУФФИКС: " (if (and (cdr (assoc 'SUFFIX beam))
                                                    (> (strlen (cdr (assoc 'SUFFIX beam))) 0))
                                             (cdr (assoc 'SUFFIX beam)) "нет")) f)
+        (write-line (strcat "  СЕЧЕНИЕ: " (vl-prin1-to-string (cdr (assoc 'CROSS beam)))) f)
+        (write-line (strcat "  СТОЛБЕЦ: " (if (cdr (assoc 'BAY beam))
+                                            (itoa (cdr (assoc 'BAY beam))) "?")) f)
+        (write-line (strcat "  РАЗМЕР: " (if (and (cdr (assoc 'SIZE_MARK beam))
+                                                  (> (strlen (cdr (assoc 'SIZE_MARK beam))) 0))
+                                           (cdr (assoc 'SIZE_MARK beam)) "нет")) f)
         (write-line "" f))
       (write-line "--- ЗАПОЛНЕНИЯ ---" f)
       (foreach fill fills
@@ -1464,16 +1531,71 @@
                 (setq suffix (strcat suffix *mk:suffix-threshold*)))))))))
   suffix)
 
-;; Разметка ригелей: TOP_ELEM / BOT_ELEM / SUFFIX / GROUP_KEY
-(defun mk:annotate-beams (beams all-panels doors bounds / out suffix len art)
+;;;---------------------------------------------------------------------
+;;; 18c-1. ВЕРТИКАЛЬНЫЕ СТОЛБЦЫ (ПРОЛЁТЫ) И МАРКЕР РАЗМЕРА ПРОФИЛЯ
+;;;---------------------------------------------------------------------
+;; Номер пролёта (1..N-1), в который попадает X; 0 — вне сетки стоек
+(defun mk:bay-index (x axes / i idx n)
+  (setq i 0 idx 0 n (length axes))
+  (while (< (1+ i) n)
+    (if (and (= idx 0)
+             (> x (- (nth i axes) *mk:tol-adjacency*))
+             (< x (+ (nth (1+ i) axes) *mk:tol-adjacency*)))
+      (setq idx (1+ i)))
+    (setq i (1+ i)))
+  idx)
+
+(defun mk:el-center-x (el / r)
+  (setq r (mk:el-xrange el))
+  (/ (+ (car r) (cadr r)) 2.0))
+
+;; Уникальные пары (артикул . габарит сечения) в порядке появления
+(defun mk:article-cross-pairs (elements / out art cross)
   (setq out nil)
+  (foreach el elements
+    (setq art   (if (mk:rec-get el 'ARTICLE) (mk:rec-get el 'ARTICLE) "БЕЗ_АРТИКУЛА")
+          cross (mk:rec-get el 'CROSS))
+    (if (null (assoc art out))
+      (setq out (cons (cons art (if (numberp cross) cross 0.0)) out))))
+  (reverse out))
+
+;; Таблица артикул -> "м"/"б": по габариту сечения (минимальный/максимальный).
+;; Если артикул один — таблица пустая (маркер не нужен).
+(defun mk:size-mark-table (elements / pairs sorted out)
+  (setq pairs (mk:article-cross-pairs elements) out nil)
+  (if (> (length pairs) 1)
+    (progn
+      (setq sorted (vl-sort pairs '(lambda (a b) (< (cdr a) (cdr b)))))
+      (setq out (list (cons (car (car sorted))          *mk:suffix-small*)
+                      (cons (car (last sorted))         *mk:suffix-big*)))
+      (if (> (length pairs) 2)
+        (prompt (strcat "\n  [WARN] Артикулов ригелей: " (itoa (length pairs))
+                        " — маркеры м/б присвоены только крайним по габариту.")))))
+  out)
+
+(defun mk:size-mark (art table)
+  (cond
+    ((cdr (assoc art *mk:article-size*)) (cdr (assoc art *mk:article-size*)))
+    ((cdr (assoc art table))             (cdr (assoc art table)))
+    (t "")))
+
+;; Разметка ригелей: TOP_ELEM / BOT_ELEM / SUFFIX / BAY / SIZE_MARK / GROUP_KEY
+(defun mk:annotate-beams (beams all-panels doors bounds posts /
+                          out suffix len art axes table mark bay)
+  (setq out   nil
+        axes  (mk:post-axes posts)
+        table (mk:size-mark-table beams))
   (foreach beam beams
     (setq beam (mk:rec-put beam 'TOP_ELEM (mk:find-top-element beam all-panels)))
     (setq beam (mk:rec-put beam 'BOT_ELEM (mk:find-bot-element beam all-panels)))
     (setq suffix (mk:get-beam-suffix beam all-panels doors bounds))
     (setq beam (mk:rec-put beam 'SUFFIX suffix))
-    (setq len (mk:size-key (mk:rec-get beam 'LENGTH))
-          art (if (mk:rec-get beam 'ARTICLE) (mk:rec-get beam 'ARTICLE) "БЕЗ_АРТИКУЛА"))
+    (setq art  (if (mk:rec-get beam 'ARTICLE) (mk:rec-get beam 'ARTICLE) "БЕЗ_АРТИКУЛА")
+          mark (mk:size-mark art table)
+          bay  (mk:bay-index (mk:el-center-x beam) axes)
+          len  (mk:size-key (mk:rec-get beam 'LENGTH)))
+    (setq beam (mk:rec-put beam 'BAY bay))
+    (setq beam (mk:rec-put beam 'SIZE_MARK mark))
     (setq beam (mk:rec-put beam 'GROUP_KEY (strcat len "_" art "_" suffix)))
     (setq out (cons beam out)))
   (reverse out))
@@ -1495,13 +1617,33 @@
     (setq idx (1+ idx)))
   (reverse plan))
 
-;; Ригели: номер по группе, суффикс уже в ключе
-(defun mk:plan-beams (beams prefix / plan idx grp k suffix)
-  (setq beams (mk:sort-xy beams) plan nil idx 1)
-  (foreach k (mk:unique-keys beams 'GROUP_KEY)
-    (setq grp    (mk:filter-by beams 'GROUP_KEY k)
-          suffix (if (mk:rec-get (car grp) 'SUFFIX) (mk:rec-get (car grp) 'SUFFIX) ""))
-    (setq plan (cons (list (strcat prefix " Рг" (itoa idx) suffix) grp) plan))
+;; Ригели: одна цифра на вертикальный столбец (пролёт), внутри столбца
+;; различаются маркером размера профиля (м/б) и суффиксом окружения.
+(defun mk:plan-beams (beams prefix / plan idx bays bay col k grp mark base used n)
+  (setq beams (mk:sort-xy beams) plan nil idx 1 used nil)
+  ;; столбцы в порядке слева направо; ригели вне сетки (BAY=0) — в конец
+  (setq bays (vl-sort (mk:unique-keys beams 'BAY) '<))
+  (if (member 0 bays)
+    (setq bays (append (vl-remove 0 bays) (list 0))))
+  (foreach bay bays
+    (setq col (mk:filter-by beams 'BAY bay))
+    (foreach k (mk:unique-keys col 'GROUP_KEY)
+      (setq grp  (mk:filter-by col 'GROUP_KEY k)
+            mark (strcat prefix " Рг" (itoa idx)
+                         (if (mk:rec-get (car grp) 'SIZE_MARK)
+                           (mk:rec-get (car grp) 'SIZE_MARK) "")
+                         (if (mk:rec-get (car grp) 'SUFFIX)
+                           (mk:rec-get (car grp) 'SUFFIX) "")))
+      ;; защита от совпадения марок разных групп в одном столбце
+      (if (member mark used)
+        (progn
+          (setq base mark n 2)
+          (while (member (strcat base "-" (itoa n)) used) (setq n (1+ n)))
+          (setq mark (strcat base "-" (itoa n)))
+          (prompt (strcat "\n  [WARN] Столбец " (itoa idx)
+                          ": разные группы дают одну марку — выдана " mark))))
+      (setq used (cons mark used))
+      (setq plan (cons (list mark grp) plan)))
     (setq idx (1+ idx)))
   (reverse plan))
 
@@ -1615,7 +1757,7 @@
       (prompt (strcat "\n  Ригелей: " (itoa (length beams))
                       ", панелей: " (itoa (length panels))))
       (setq bounds (mk:find-vitrage-bounds posts beams))
-      (setq beams  (mk:annotate-beams beams panels doors bounds))
+      (setq beams  (mk:annotate-beams beams panels doors bounds posts))
       (setq plan   (mk:plan-beams beams prefix))
       (prompt (strcat "\n  Марок (групп): " (itoa (length plan))))
       (setq count 0 skip-count 0)
@@ -1719,7 +1861,7 @@
   (setq doors   (nth 4 topo-result))
   (setq all-panels (append fills windows doors))
   (setq posts (mk:annotate-posts posts (append all-panels beams)))
-  (setq beams (mk:annotate-beams beams all-panels doors bounds))
+  (setq beams (mk:annotate-beams beams all-panels doors bounds posts))
   (prompt "\n[6/8] Визуализация и вывод данных...")
   (mk:draw-model posts beams fills windows doors bounds)
   (mk:dump-data vitrage bounds posts beams fills windows doors)
