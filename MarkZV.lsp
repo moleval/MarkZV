@@ -73,9 +73,22 @@
   )
 )
 
-(defun c:MK_CHECK (/ result)
-  (prompt "\n[MK_CHECK] Проверка баланса скобок MarkZV.lsp...")
-  (setq result (mk:check-brackets "D:/MarkZV.lsp"))
+;; Путь к исходнику: несколько кандидатов + findfile (донор: mark:find-source)
+(defun mk:find-source (/ cand out)
+  (setq out nil)
+  (foreach cand (list "D:/MarkZV.lsp" "D:/MarkZV/MarkZV.lsp"
+                      "C:/Work/MarkZV/MarkZV.lsp" "MarkZV.lsp")
+    (if (and (null out) (findfile cand))
+      (setq out (findfile cand))))
+  out)
+
+(defun c:МАРКАВСКОБКИ (/ result path)
+  (prompt "\n[МАРКАВСКОБКИ] Проверка баланса скобок MarkZV.lsp...")
+  (setq path (mk:find-source))
+  (if path
+    (prompt (strcat "\n  Файл: " path))
+    (prompt "\n  [WARN] Файл не найден среди кандидатов."))
+  (setq result (if path (mk:check-brackets path) nil))
   (if result
     (prompt "\n[OK] Файл корректен.")
     (prompt "\n[ERROR] Обнаружены проблемы. См. сообщение выше."))
@@ -85,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "1.1")
+(setq *mk:ver*            "1.2")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -94,7 +107,7 @@
 (setq *mk:block-post*     "стойка")
 (setq *mk:block-beam*     "ригель")
 
-(setq *mk:attr-profile*   "Профиль")
+(setq *mk:attr-article*   "Артикул")
 (setq *mk:attr-thickness* "Толщина")
 (setq *mk:attr-mark*      "Марка")
 (setq *mk:attr-name*      "Название")
@@ -119,7 +132,7 @@
 (setq *mk:out-file*       "D:/MARKZV_MODEL.txt")
 (setq *mk:diag-file*      "D:/MARKZV_DIAG.txt")
 (setq *mk:cached-data*    nil)
-(setq *mk:last-ss*        nil)   ; выборка последнего МАРКАСБОР
+(setq *mk:last-ss*        nil)   ; выборка последней МАРКАВГЕОМЕТРИЯ
 (setq *mk:dyn-cache*      nil)   ; кэш динамических свойств: ename -> alist
 
 (setq *mk:suffix-window-one*    "ок")
@@ -128,6 +141,7 @@
 (setq *mk:suffix-threshold*     "н")
 (setq *mk:suffix-warm-cold*     "тх")
 (setq *mk:suffix-cold-warm*     "хт")
+(setq *mk:suffix-mirror*        "зерк")
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -149,20 +163,6 @@
 
 (defun mk:rec-get (rec key)
   (cdr (assoc key rec)))
-
-;; Накопление групп: (ключ (элементы …)) с сохранением порядка
-(defun mk:group-add (groups key el / grp)
-  (setq grp (assoc key groups))
-  (if grp
-    (subst (list key (cons el (cadr grp))) grp groups)
-    (cons (list key (list el)) groups)))
-
-;; Финализация: порядок групп и элементов внутри групп — как на чертеже
-(defun mk:groups-finish (groups / out grp)
-  (setq out nil)
-  (foreach grp groups
-    (setq out (cons (list (car grp) (reverse (cadr grp))) out)))
-  out)
 
 (defun mk:numval (x)
   (cond ((numberp x) (float x))
@@ -483,7 +483,7 @@
                         (cons 'ENAME mline)
                         (cons 'INS_PT (list ins-x ins-y 0.0))
                         (cons 'LENGTH len)
-                        (cons 'PROFILE nil)
+                        (cons 'ARTICLE nil)
                         (cons 'VISIBILITY nil)
                         (cons 'PROTRUDING nil)
                         (cons 'LEFT_CONN nil)
@@ -501,7 +501,7 @@
                         (cons 'ENAME mline)
                         (cons 'INS_PT (list ins-x ins-y 0.0))
                         (cons 'LENGTH len)
-                        (cons 'PROFILE nil)
+                        (cons 'ARTICLE nil)
                         (cons 'VISIBILITY nil)
                         (cons 'TOP_ELEM nil)
                         (cons 'BOT_ELEM nil)
@@ -529,7 +529,7 @@
     (cons 'WIDTH      (car dw))
     (cons 'SIZE_SRC   (strcat (cadr dh) "/" (cadr dw)))
     (cons 'THICKNESS  (mk:get-attr ename *mk:attr-thickness*))
-    (cons 'PROFILE    (mk:get-attr ename *mk:attr-profile*))
+    (cons 'ARTICLE    (mk:get-attr ename *mk:attr-article*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'CONN_POSTS nil)
   ))
@@ -589,7 +589,7 @@
     (cons 'XSCALE     (cdr (assoc 'XSCALE geom)))
     (cons 'LENGTH     (car dl))
     (cons 'SIZE_SRC   (cadr dl))
-    (cons 'PROFILE    (mk:get-attr ename *mk:attr-profile*))
+    (cons 'ARTICLE    (mk:get-attr ename *mk:attr-article*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'LEFT_CONN  nil)
     (cons 'RIGHT_CONN nil)
@@ -608,7 +608,7 @@
     (cons 'ROTATION   (cdr (assoc 'ROTATION geom)))
     (cons 'LENGTH     (car dl))
     (cons 'SIZE_SRC   (cadr dl))
-    (cons 'PROFILE    (mk:get-attr ename *mk:attr-profile*))
+    (cons 'ARTICLE    (mk:get-attr ename *mk:attr-article*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'TOP_ELEM   nil)
     (cons 'BOT_ELEM   nil)
@@ -1209,8 +1209,10 @@
         (write-line (strcat "  INS_PT: " (vl-prin1-to-string (cdr (assoc 'INS_PT post)))) f)
         (write-line (strcat "  LENGTH: " (vl-prin1-to-string (cdr (assoc 'LENGTH post)))
                             "  (источник: " (if (cdr (assoc 'SIZE_SRC post)) (cdr (assoc 'SIZE_SRC post)) "НЕТ") ")") f)
-        (write-line (strcat "  PROFILE: " (if (cdr (assoc 'PROFILE post)) (cdr (assoc 'PROFILE post)) "НЕТ")) f)
+        (write-line (strcat "  АРТИКУЛ: " (if (cdr (assoc 'ARTICLE post)) (cdr (assoc 'ARTICLE post)) "НЕТ")) f)
         (write-line (strcat "  PROTRUDING: " (if (cdr (assoc 'PROTRUDING post)) "ДА" "НЕТ")) f)
+        (write-line (strcat "  СЛЕВА:  " (if (cdr (assoc 'LEFT_TYPES post))  (cdr (assoc 'LEFT_TYPES post))  "?")) f)
+        (write-line (strcat "  СПРАВА: " (if (cdr (assoc 'RIGHT_TYPES post)) (cdr (assoc 'RIGHT_TYPES post)) "?")) f)
         (write-line (strcat "  LEFT_CONN: " (itoa (length (cdr (assoc 'LEFT_CONN post))))) f)
         (write-line (strcat "  RIGHT_CONN: " (itoa (length (cdr (assoc 'RIGHT_CONN post))))) f)
         (write-line "" f))
@@ -1219,9 +1221,12 @@
         (write-line (strcat "  INS_PT: " (vl-prin1-to-string (cdr (assoc 'INS_PT beam)))) f)
         (write-line (strcat "  LENGTH: " (vl-prin1-to-string (cdr (assoc 'LENGTH beam)))
                             "  (источник: " (if (cdr (assoc 'SIZE_SRC beam)) (cdr (assoc 'SIZE_SRC beam)) "НЕТ") ")") f)
-        (write-line (strcat "  PROFILE: " (if (cdr (assoc 'PROFILE beam)) (cdr (assoc 'PROFILE beam)) "НЕТ")) f)
+        (write-line (strcat "  АРТИКУЛ: " (if (cdr (assoc 'ARTICLE beam)) (cdr (assoc 'ARTICLE beam)) "НЕТ")) f)
         (write-line (strcat "  TOP_ELEM: " (if (cdr (assoc 'TOP_ELEM beam)) "Есть" "Нет")) f)
         (write-line (strcat "  BOT_ELEM: " (if (cdr (assoc 'BOT_ELEM beam)) "Есть" "Нет")) f)
+        (write-line (strcat "  СУФФИКС: " (if (and (cdr (assoc 'SUFFIX beam))
+                                                   (> (strlen (cdr (assoc 'SUFFIX beam))) 0))
+                                            (cdr (assoc 'SUFFIX beam)) "нет")) f)
         (write-line "" f))
       (write-line "--- ЗАПОЛНЕНИЯ ---" f)
       (foreach fill fills
@@ -1229,7 +1234,7 @@
         (write-line (strcat "  HEIGHT: " (vl-prin1-to-string (cdr (assoc 'HEIGHT fill)))) f)
         (write-line (strcat "  WIDTH: " (vl-prin1-to-string (cdr (assoc 'WIDTH fill)))) f)
         (write-line (strcat "  THICKNESS: " (if (cdr (assoc 'THICKNESS fill)) (cdr (assoc 'THICKNESS fill)) "НЕТ")) f)
-        (write-line (strcat "  PROFILE: " (if (cdr (assoc 'PROFILE fill)) (cdr (assoc 'PROFILE fill)) "НЕТ")) f)
+        (write-line (strcat "  АРТИКУЛ: " (if (cdr (assoc 'ARTICLE fill)) (cdr (assoc 'ARTICLE fill)) "НЕТ")) f)
         (write-line "" f))
       (write-line "--- ОКНА ---" f)
       (foreach win windows
@@ -1277,31 +1282,147 @@
       (rtos (* step (fix (+ (/ (float v) step) 0.5))) 2 1))
     "0"))
 
-(defun mk:group-by-size-profile (elements / groups key)
-  (setq groups nil)
+;;;---------------------------------------------------------------------
+;;; 18a. СЛУЖЕБНОЕ: сортировка, фильтры, уникальные ключи
+;;;---------------------------------------------------------------------
+;; Порядок обнаружения: слева направо, снизу вверх
+(defun mk:xy< (a b / xa xb ya yb)
+  (setq xa (car  (cdr (assoc 'INS_PT a)))
+        xb (car  (cdr (assoc 'INS_PT b)))
+        ya (cadr (cdr (assoc 'INS_PT a)))
+        yb (cadr (cdr (assoc 'INS_PT b))))
+  (cond
+    ((null xa) nil)
+    ((null xb) t)
+    ((< xa (- xb *mk:tol-adjacency*)) t)
+    ((> xa (+ xb *mk:tol-adjacency*)) nil)
+    (t (< ya yb))))
+
+(defun mk:insert-xy (sorted el / out done)
+  (setq out nil done nil)
+  (foreach x sorted
+    (if (and (not done) (mk:xy< el x))
+      (progn (setq out (cons el out)) (setq done t)))
+    (setq out (cons x out)))
+  (if (not done) (setq out (cons el out)))
+  (reverse out))
+
+(defun mk:sort-xy (lst / out el)
+  (setq out nil)
+  (foreach el lst (setq out (mk:insert-xy out el)))
+  out)
+
+(defun mk:filter-by (elements key val / out)
+  (setq out nil)
   (foreach el elements
-    (setq key (strcat
-      (mk:size-key (mk:rec-get el 'LENGTH))
-      "_"
-      (if (mk:rec-get el 'PROFILE)
-        (mk:rec-get el 'PROFILE) "БЕЗ_ПРОФИЛЯ")))
-    (setq groups (mk:group-add groups key el)))
-  (mk:groups-finish groups))
+    (if (equal (mk:rec-get el key) val) (setq out (cons el out))))
+  (reverse out))
 
-(defun mk:group-beams (beams / groups key)
-  (setq groups nil)
-  (foreach beam beams
-    (setq key (strcat
-      (mk:size-key (mk:rec-get beam 'LENGTH))
-      "_"
-      (if (mk:rec-get beam 'PROFILE)
-        (mk:rec-get beam 'PROFILE) "БЕЗ_ПРОФИЛЯ")
-      "_"
-      (if (mk:rec-get beam 'SUFFIX)
-        (mk:rec-get beam 'SUFFIX) "БЕЗ_СУФФИКСА")))
-    (setq groups (mk:group-add groups key beam)))
-  (mk:groups-finish groups))
+(defun mk:reject-by (elements key val / out)
+  (setq out nil)
+  (foreach el elements
+    (if (not (equal (mk:rec-get el key) val)) (setq out (cons el out))))
+  (reverse out))
 
+(defun mk:unique-keys (elements key / out v)
+  (setq out nil)
+  (foreach el elements
+    (setq v (mk:rec-get el key))
+    (if (not (member v out)) (setq out (cons v out))))
+  (reverse out))
+
+(defun mk:join (lst sep / out first)
+  (setq out "" first t)
+  (foreach s lst
+    (if first (setq out s first nil) (setq out (strcat out sep s))))
+  out)
+
+;;;---------------------------------------------------------------------
+;;; 18b. ТИП ПРИМЫКАНИЯ СЛЕВА / СПРАВА ОТ СТОЙКИ
+;;;---------------------------------------------------------------------
+;; Оси стоек: уникальные X с допуском кластеризации
+(defun mk:post-axes (posts / xs sorted out last)
+  (setq xs nil)
+  (foreach p posts
+    (if (cdr (assoc 'INS_PT p))
+      (setq xs (cons (car (cdr (assoc 'INS_PT p))) xs))))
+  (setq sorted (vl-sort xs '<) out nil last nil)
+  (foreach v sorted
+    (if (or (null out) (> (- v last) *mk:tol-adjacency*))
+      (progn (setq out (cons v out)) (setq last v))))
+  (reverse out))
+
+(defun mk:axis-prev (axes x / out)
+  (setq out nil)
+  (foreach a axes
+    (if (< a (- x *mk:tol-adjacency*)) (setq out a)))
+  out)
+
+(defun mk:axis-next (axes x / out)
+  (setq out nil)
+  (foreach a (reverse axes)
+    (if (> a (+ x *mk:tol-adjacency*)) (setq out a)))
+  out)
+
+(defun mk:el-xrange (el / x w)
+  (setq x (car (cdr (assoc 'INS_PT el))))
+  (if (= (cdr (assoc 'TYPE el)) "РИГЕЛЬ")
+    (setq w (if (cdr (assoc 'LENGTH el)) (cdr (assoc 'LENGTH el)) 0.0))
+    (setq w (if (cdr (assoc 'WIDTH el))  (cdr (assoc 'WIDTH el))  0.0)))
+  (list x (+ x w)))
+
+(defun mk:el-yrange (el / y h)
+  (setq y (cadr (cdr (assoc 'INS_PT el))))
+  (if (= (cdr (assoc 'TYPE el)) "РИГЕЛЬ")
+    (setq h 0.0)
+    (setq h (if (cdr (assoc 'HEIGHT el)) (cdr (assoc 'HEIGHT el)) 0.0)))
+  (list y (+ y h)))
+
+(defun mk:overlap? (lo1 hi1 lo2 hi2)
+  (and (<= lo1 (+ hi2 *mk:tol-adjacency*))
+       (>= hi1 (- lo2 *mk:tol-adjacency*))))
+
+;; Типы элементов в пролёте [lo .. hi], перекрывающихся со стойкой по высоте
+(defun mk:side-types (post elements lo hi / out typ xr yr cx span)
+  (setq span (mk:post-span post) out nil)
+  (if (and lo hi)
+    (foreach el elements
+      (if (cdr (assoc 'INS_PT el))
+        (progn
+          (setq xr  (mk:el-xrange el)
+                yr  (mk:el-yrange el)
+                cx  (/ (+ (car xr) (cadr xr)) 2.0)
+                typ (cdr (assoc 'TYPE el)))
+          (if (and (> cx (- lo *mk:tol-adjacency*))
+                   (< cx (+ hi *mk:tol-adjacency*))
+                   (mk:overlap? (car yr) (cadr yr) (car span) (cadr span))
+                   (not (member typ out)))
+            (setq out (cons typ out)))))))
+  (if out (mk:join (vl-sort out '<) "+") "ПУСТО"))
+
+;; Разметка стоек: LEFT_TYPES / RIGHT_TYPES / ORIENT / GROUP_KEY
+(defun mk:annotate-posts (posts elements / axes out x lt rt art len canon)
+  (setq axes (mk:post-axes posts) out nil)
+  (foreach post posts
+    (setq x   (car (cdr (assoc 'INS_PT post)))
+          lt  (mk:side-types post elements (mk:axis-prev axes x) x)
+          rt  (mk:side-types post elements x (mk:axis-next axes x))
+          len (mk:size-key (mk:rec-get post 'LENGTH))
+          art (if (mk:rec-get post 'ARTICLE) (mk:rec-get post 'ARTICLE) "БЕЗ_АРТИКУЛА"))
+    ;; канонический ключ не зависит от того, зеркальна стойка или нет
+    (setq canon (if (<= (strcase lt) (strcase rt))
+                  (strcat lt ">" rt)
+                  (strcat rt ">" lt)))
+    (setq post (mk:rec-put post 'LEFT_TYPES  lt))
+    (setq post (mk:rec-put post 'RIGHT_TYPES rt))
+    (setq post (mk:rec-put post 'ORIENT      (strcat lt ">" rt)))
+    (setq post (mk:rec-put post 'GROUP_KEY   (strcat len "_" art "_" canon)))
+    (setq out (cons post out)))
+  (reverse out))
+
+;;;---------------------------------------------------------------------
+;;; 18c. СУФФИКС РИГЕЛЯ
+;;;---------------------------------------------------------------------
 (defun mk:get-beam-suffix (beam all-panels doors bounds /
                            top-elem bot-elem top-type bot-type
                            top-thick bot-thick suffix beam-y door-y)
@@ -1343,15 +1464,57 @@
                 (setq suffix (strcat suffix *mk:suffix-threshold*)))))))))
   suffix)
 
-;; Одна выборка чертежа на команду (раньше был ssget "_X" на каждый тип блока)
+;; Разметка ригелей: TOP_ELEM / BOT_ELEM / SUFFIX / GROUP_KEY
+(defun mk:annotate-beams (beams all-panels doors bounds / out suffix len art)
+  (setq out nil)
+  (foreach beam beams
+    (setq beam (mk:rec-put beam 'TOP_ELEM (mk:find-top-element beam all-panels)))
+    (setq beam (mk:rec-put beam 'BOT_ELEM (mk:find-bot-element beam all-panels)))
+    (setq suffix (mk:get-beam-suffix beam all-panels doors bounds))
+    (setq beam (mk:rec-put beam 'SUFFIX suffix))
+    (setq len (mk:size-key (mk:rec-get beam 'LENGTH))
+          art (if (mk:rec-get beam 'ARTICLE) (mk:rec-get beam 'ARTICLE) "БЕЗ_АРТИКУЛА"))
+    (setq beam (mk:rec-put beam 'GROUP_KEY (strcat len "_" art "_" suffix)))
+    (setq out (cons beam out)))
+  (reverse out))
+
+;;;---------------------------------------------------------------------
+;;; 18d. ПЛАН МАРОК (марка -> список элементов)
+;;;---------------------------------------------------------------------
+;; Стойки: номер по канонической группе, зеркальная ориентация — суффикс "зерк"
+(defun mk:plan-posts (posts prefix / plan idx grp base-or base mirror k)
+  (setq posts (mk:sort-xy posts) plan nil idx 1)
+  (foreach k (mk:unique-keys posts 'GROUP_KEY)
+    (setq grp     (mk:filter-by posts 'GROUP_KEY k)
+          base-or (mk:rec-get (car grp) 'ORIENT)
+          base    (mk:filter-by grp 'ORIENT base-or)
+          mirror  (mk:reject-by grp 'ORIENT base-or))
+    (setq plan (cons (list (strcat prefix " Ст" (itoa idx)) base) plan))
+    (if mirror
+      (setq plan (cons (list (strcat prefix " Ст" (itoa idx) *mk:suffix-mirror*) mirror) plan)))
+    (setq idx (1+ idx)))
+  (reverse plan))
+
+;; Ригели: номер по группе, суффикс уже в ключе
+(defun mk:plan-beams (beams prefix / plan idx grp k suffix)
+  (setq beams (mk:sort-xy beams) plan nil idx 1)
+  (foreach k (mk:unique-keys beams 'GROUP_KEY)
+    (setq grp    (mk:filter-by beams 'GROUP_KEY k)
+          suffix (if (mk:rec-get (car grp) 'SUFFIX) (mk:rec-get (car grp) 'SUFFIX) ""))
+    (setq plan (cons (list (strcat prefix " Рг" (itoa idx) suffix) grp) plan))
+    (setq idx (1+ idx)))
+  (reverse plan))
+
+;;;---------------------------------------------------------------------
+;;; 18e. ОБЛАСТЬ ДЕЙСТВИЯ, UNDO, ЗАПИСЬ
+;;;---------------------------------------------------------------------
 (defun mk:ss-all-inserts ()
   (ssget "_X" (list (cons 0 "INSERT"))))
 
-;; Область действия команды: своя выборка -> выборка последнего МАРКАСБОР ->
-;; (только если ничего нет) весь чертёж. Раньше всегда брался весь чертёж,
-;; из-за чего марки получали блоки за пределами выделения.
+;; Область действия команды: своя выборка -> выборка последней МАРКАВГЕОМЕТРИЯ ->
+;; (только если ничего нет) весь чертёж.
 (defun mk:scope-ss (/ ss n)
-  (prompt "\nВыберите элементы витража (Enter — выборка последнего МАРКАСБОР): ")
+  (prompt "\nВыберите элементы витража (Enter — выборка последней МАРКАВГЕОМЕТРИЯ): ")
   (setq ss (ssget (list (cons 0 "INSERT"))))
   (cond
     (ss
@@ -1362,7 +1525,7 @@
      (setq n (vl-catch-all-apply 'sslength (list *mk:last-ss*)))
      (if (and *mk:last-ss* (not (vl-catch-all-error-p n)) (> n 0))
        (progn
-         (prompt (strcat "\n  Область: выборка последнего МАРКАСБОР, объектов " (itoa n)))
+         (prompt (strcat "\n  Область: выборка последней МАРКАВГЕОМЕТРИЯ, объектов " (itoa n)))
          *mk:last-ss*)
        (progn
          (prompt "\n  [WARN] Выборки нет — обрабатывается ВЕСЬ чертёж.")
@@ -1389,83 +1552,79 @@
       (setq skip-count (1+ skip-count))))
   (list count skip-count))
 
-(defun c:МАРКАЗАПОЛН-СТ (/ ss posts prefix groups idx mark-str
-                           count skip-count res doc)
-  (prompt "\n[МАРКАЗАПОЛН-СТ] Автозаполнение атрибутов стоек...")
+;; Сбор всех типов элементов из выборки
+(defun mk:collect-scope (ss / posts beams fills windows doors)
+  (setq posts   (mapcar 'mk:collect-post   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post*   "*"))))
+  (setq beams   (mapcar 'mk:collect-beam   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam*   "*"))))
+  (setq fills   (mapcar 'mk:collect-fill   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill*   "*"))))
+  (setq windows (mapcar 'mk:collect-window (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*"))))
+  (setq doors   (mapcar 'mk:collect-door   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door*   "*"))))
+  (list (cons 'POSTS posts) (cons 'BEAMS beams) (cons 'FILLS fills)
+        (cons 'WINDOWS windows) (cons 'DOORS doors)
+        (cons 'PANELS (append fills windows doors))))
+
+;;;---------------------------------------------------------------------
+;;; 18f. КОМАНДЫ МАРКИРОВКИ
+;;;---------------------------------------------------------------------
+(defun c:МАРКАВСТ (/ ss data posts elements prefix plan res count skip-count doc)
+  (prompt "\n[МАРКАВСТ] Марки стоек...")
+  (setq *mk:dyn-cache* nil)
   (setq prefix (mk:get-vitrage-prefix))
   (prompt (strcat "\n  Префикс витража: " prefix))
-  (setq *mk:dyn-cache* nil)
-  (setq ss    (mk:scope-ss))
-  (setq posts (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
+  (setq ss   (mk:scope-ss))
+  (setq data (mk:collect-scope ss))
+  (setq posts (cdr (assoc 'POSTS data)))
   (if (null posts)
     (prompt "\n  [INFO] Блоки стоек не найдены.")
     (progn
-      (setq posts (mapcar 'mk:collect-post posts))
-      (prompt (strcat "\n  Найдено стоек: " (itoa (length posts))))
-      (setq groups (mk:group-by-size-profile posts))
-      (prompt (strcat "\n  Уникальных групп: " (itoa (length groups))))
-      (setq idx 1 count 0 skip-count 0)
+      (setq elements (append (cdr (assoc 'PANELS data)) (cdr (assoc 'BEAMS data))))
+      (prompt (strcat "\n  Стоек: " (itoa (length posts))
+                      ", элементов окружения: " (itoa (length elements))))
+      (setq posts (mk:annotate-posts posts elements))
+      (setq plan  (mk:plan-posts posts prefix))
+      (prompt (strcat "\n  Марок (групп): " (itoa (length plan))))
+      (setq count 0 skip-count 0)
       (setq doc (mk:undo-begin))
-      (foreach grp groups
-        (setq mark-str (strcat prefix " Ст" (itoa idx)))
-        (setq res (mk:write-marks (cadr grp) mark-str))
-        (prompt (strcat "\n  " mark-str " — шт.: " (itoa (car res))))
+      (foreach item plan
+        (setq res (mk:write-marks (cadr item) (car item)))
+        (prompt (strcat "\n  " (car item) " — шт.: " (itoa (car res))
+                        "   [" (mk:rec-get (car (cadr item)) 'LEFT_TYPES)
+                        " | " (mk:rec-get (car (cadr item)) 'RIGHT_TYPES) "]"))
         (setq count      (+ count (car res))
-              skip-count (+ skip-count (cadr res))
-              idx        (1+ idx)))
+              skip-count (+ skip-count (cadr res))))
       (mk:undo-end doc)
       (prompt (strcat "\n[ГОТОВО] Заполнено: " (itoa count)
                       ", Пропущено: " (itoa skip-count)))))
   (princ))
 
-(defun c:МАРКАЗАПОЛН-РГ (/ ss beams fills windows doors posts all-panels
-                           prefix groups idx mark-str suffix count skip-count
-                           bounds new-beams beam first-beam res doc)
-  (prompt "\n[МАРКАЗАПОЛН-РГ] Автозаполнение атрибутов ригелей...")
+(defun c:МАРКАВРГ (/ ss data beams posts panels doors bounds prefix plan
+                     res count skip-count doc)
+  (prompt "\n[МАРКАВРГ] Марки ригелей...")
+  (setq *mk:dyn-cache* nil)
   (setq prefix (mk:get-vitrage-prefix))
   (prompt (strcat "\n  Префикс витража: " prefix))
-  (setq *mk:dyn-cache* nil)
-  (setq ss      (mk:scope-ss))
-  (setq posts   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
-  (setq beams   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*")))
-  (setq fills   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
-  (setq windows (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*")))
-  (setq doors   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door* "*")))
+  (setq ss   (mk:scope-ss))
+  (setq data (mk:collect-scope ss))
+  (setq beams  (cdr (assoc 'BEAMS data))
+        posts  (cdr (assoc 'POSTS data))
+        panels (cdr (assoc 'PANELS data))
+        doors  (cdr (assoc 'DOORS data)))
   (if (null beams)
     (prompt "\n  [INFO] Блоки ригелей не найдены.")
     (progn
-      (setq posts   (mapcar 'mk:collect-post posts))
-      (setq beams   (mapcar 'mk:collect-beam beams))
-      (setq fills   (mapcar 'mk:collect-fill fills))
-      (setq windows (mapcar 'mk:collect-window windows))
-      (setq doors   (mapcar 'mk:collect-door doors))
-      (setq all-panels (append fills windows doors))
+      (prompt (strcat "\n  Ригелей: " (itoa (length beams))
+                      ", панелей: " (itoa (length panels))))
       (setq bounds (mk:find-vitrage-bounds posts beams))
-      (prompt "\n  Построение топологии для суффиксов...")
-      (setq new-beams nil)
-      (foreach beam beams
-        (setq beam (mk:rec-put beam 'TOP_ELEM (mk:find-top-element beam all-panels)))
-        (setq beam (mk:rec-put beam 'BOT_ELEM (mk:find-bot-element beam all-panels)))
-        (setq suffix (mk:get-beam-suffix beam all-panels doors bounds))
-        (setq beam (mk:rec-put beam 'SUFFIX suffix))
-        (setq new-beams (cons beam new-beams)))
-      (setq beams (reverse new-beams))
-      (setq groups (mk:group-beams beams))
-      (prompt (strcat "\n  Уникальных групп: " (itoa (length groups))))
-      (setq idx 1 count 0 skip-count 0)
+      (setq beams  (mk:annotate-beams beams panels doors bounds))
+      (setq plan   (mk:plan-beams beams prefix))
+      (prompt (strcat "\n  Марок (групп): " (itoa (length plan))))
+      (setq count 0 skip-count 0)
       (setq doc (mk:undo-begin))
-      (foreach grp groups
-        (setq first-beam (car (cadr grp)))
-        (setq suffix (if (mk:rec-get first-beam 'SUFFIX)
-                       (mk:rec-get first-beam 'SUFFIX) ""))
-        (if (and suffix (> (strlen suffix) 0))
-          (setq mark-str (strcat prefix " Рг" (itoa idx) suffix))
-          (setq mark-str (strcat prefix " Рг" (itoa idx))))
-        (setq res (mk:write-marks (cadr grp) mark-str))
-        (prompt (strcat "\n  " mark-str " — шт.: " (itoa (car res))))
+      (foreach item plan
+        (setq res (mk:write-marks (cadr item) (car item)))
+        (prompt (strcat "\n  " (car item) " — шт.: " (itoa (car res))))
         (setq count      (+ count (car res))
-              skip-count (+ skip-count (cadr res))
-              idx        (1+ idx)))
+              skip-count (+ skip-count (cadr res))))
       (mk:undo-end doc)
       (prompt (strcat "\n[ГОТОВО] Заполнено: " (itoa count)
                       ", Пропущено: " (itoa skip-count)))))
@@ -1474,11 +1633,11 @@
 ;;;=====================================================================
 ;;; 19. ГЛАВНАЯ КОМАНДА
 ;;;=====================================================================
-(defun c:МАРКАСБОР (/ ss vitrage vitrage-pt posts beams fills windows doors
+(defun c:МАРКАВГЕОМЕТРИЯ (/ ss vitrage vitrage-pt posts beams fills windows doors
                       bounds topo-result all-panels dup-count overlap-count
                       out-count post-result protruding-count mlines
                       mline-result use-mlines mode-kw post-enames beam-enames)
-  (prompt "\n[МАРКАСБОР] Сбор данных и построение 2D модели витража...")
+  (prompt "\n[МАРКАВГЕОМЕТРИЯ] Сбор данных и построение 2D модели витража...")
   (prompt "\nВыберите элементы витража (рамкой): ")
   (setq *mk:dyn-cache* nil)
   (setq ss (ssget))
@@ -1558,6 +1717,9 @@
   (setq fills   (nth 2 topo-result))
   (setq windows (nth 3 topo-result))
   (setq doors   (nth 4 topo-result))
+  (setq all-panels (append fills windows doors))
+  (setq posts (mk:annotate-posts posts (append all-panels beams)))
+  (setq beams (mk:annotate-beams beams all-panels doors bounds))
   (prompt "\n[6/8] Визуализация и вывод данных...")
   (mk:draw-model posts beams fills windows doors bounds)
   (mk:dump-data vitrage bounds posts beams fills windows doors)
@@ -1576,12 +1738,12 @@
 ;;;=====================================================================
 ;;; 20. КОМАНДА ТЕСТОВОЙ ОТРИСОВКИ
 ;;;=====================================================================
-(defun c:МАРКАМОДЕЛЬ (/ posts beams fills windows doors bounds)
-  (prompt "\n[МАРКАМОДЕЛЬ] Тестовая отрисовка модели витража...")
+(defun c:МАРКАВМОДЕЛЬ (/ posts beams fills windows doors bounds)
+  (prompt "\n[МАРКАВМОДЕЛЬ] Тестовая отрисовка модели витража...")
   (if (null *mk:cached-data*)
     (progn
       (prompt "\n  Данные не найдены. Запуск сбора...")
-      (c:МАРКАСБОР)))
+      (c:МАРКАВГЕОМЕТРИЯ)))
   (if *mk:cached-data*
     (progn
       (setq posts   (nth 0 *mk:cached-data*))
@@ -1592,11 +1754,11 @@
       (setq bounds  (nth 5 *mk:cached-data*))
       (mk:draw-test-model posts beams fills windows doors bounds)
       (prompt "\n[ГОТОВО] Тестовая модель отрисована."))
-    (prompt "\n[ERROR] Нет данных. Запустите МАРКАСБОР."))
+    (prompt "\n[ERROR] Нет данных. Запустите МАРКАВГЕОМЕТРИЯ."))
   (princ))
 
 ;;;=====================================================================
-;;; 20a. ДИАГНОСТИКА БЛОКА (почему LENGTH/WIDTH/PROFILE = nil)
+;;; 20a. ДИАГНОСТИКА БЛОКА (почему LENGTH/WIDTH/АРТИКУЛ = nil)
 ;;;=====================================================================
 (defun mk:fmt (v) (vl-princ-to-string v))
 
@@ -1637,14 +1799,14 @@
   (setq lines (cons (strcat "   " *mk:mask-height* " -> " (mk:fmt (mk:get-dyn obj *mk:mask-height*))) lines))
   (setq lines (cons (strcat "   " *mk:mask-width*  " -> " (mk:fmt (mk:get-dyn obj *mk:mask-width*)))  lines))
   (setq lines (cons (strcat "   Видимость -> " (mk:fmt (mk:get-vis obj))) lines))
-  (setq lines (cons (strcat "   Атрибут «" *mk:attr-profile* "» -> "
-                            (mk:fmt (mk:get-attr ename *mk:attr-profile*))) lines))
+  (setq lines (cons (strcat "   Атрибут «" *mk:attr-article* "» -> "
+                            (mk:fmt (mk:get-attr ename *mk:attr-article*))) lines))
   (setq lines (cons (strcat "   Атрибут «" *mk:attr-mark* "» -> "
                             (if (mk:has-attr? ename *mk:attr-mark*) "ЕСТЬ" "НЕТ")) lines))
   (reverse lines))
 
-(defun c:МАРКАДИАГ (/ sel ename lines f)
-  (prompt "\n[МАРКАДИАГ] Диагностика блока.")
+(defun c:МАРКАВДИАГНОЗ (/ sel ename lines f)
+  (prompt "\n[МАРКАВДИАГНОЗ] Диагностика блока.")
   (setq sel (entsel "\nУкажите блок (стойку, ригель, заполнение, окно, дверь): "))
   (if (null sel)
     (prompt "\n  [INFO] Блок не указан.")
@@ -1658,7 +1820,7 @@
       (setq f (open *mk:diag-file* "a"))
       (if f
         (progn
-          (write-line "=== МАРКАДИАГ ===" f)
+          (write-line "=== МАРКАВДИАГНОЗ ===" f)
           (foreach l lines (write-line l f))
           (write-line "" f)
           (close f)
@@ -1671,10 +1833,10 @@
 ;;;=====================================================================
 (prompt (strcat "\n[MarkZV] Ред. " *mk:ver* " загружена."))
 (prompt "\n  Команды:")
-(prompt "\n    МАРКАСБОР       - Сбор данных и построение 2D модели")
-(prompt "\n    МАРКАМОДЕЛЬ     - Тестовая отрисовка модели")
-(prompt "\n    МАРКАЗАПОЛН-СТ  - Автозаполнение атрибутов стоек")
-(prompt "\n    МАРКАЗАПОЛН-РГ  - Автозаполнение атрибутов ригелей")
-(prompt "\n    МАРКАДИАГ       - Диагностика блока (свойства, атрибуты, габарит)")
-(prompt "\n    MK_CHECK        - Проверка баланса скобок файла")
+(prompt "\n    МАРКАВГЕОМЕТРИЯ - Сбор данных и построение 2D модели")
+(prompt "\n    МАРКАВМОДЕЛЬ    - Тестовая отрисовка модели")
+(prompt "\n    МАРКАВСТ        - Марки стоек")
+(prompt "\n    МАРКАВРГ        - Марки ригелей")
+(prompt "\n    МАРКАВДИАГНОЗ   - Диагностика блока (свойства, атрибуты, габарит)")
+(prompt "\n    МАРКАВСКОБКИ    - Проверка баланса скобок файла")
 (princ)
