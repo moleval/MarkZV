@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.6")
+(setq *mk:ver*            "2.7")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -151,15 +151,35 @@
 (setq *mk:layer-test*           "Сетка витража тест")
 (setq *mk:group-model*          "Сетка_витража")        ; имя группы — без пробелов
 (setq *mk:group-test*           "Сетка_витража_тест")
-;; Припуск длины ригеля относительно нарисованного размера (в свету).
-;; Значение по умолчанию: +12.5 мм на сторону, итого +25 мм.
-(setq *mk:beam-allowance*       25.0)
+;;; ДЛИНА РИГЕЛЯ
+;;;   КП50   — длина ригеля равна длине элемента (световому проёму), припуск 0;
+;;;   КП50К  — длина элемента + 12.5 x 2 = 25 мм;
+;;;   вертикальный ригель («т») — всегда как КП50, припуск 0.
+;;; Система определяется по артикулу: список *mk:articles-kp50k* (артикулы,
+;;; встречающиеся только на листе «База СИАЛ КП50К»).
+(setq *mk:beam-allowance*       0.0)    ; по умолчанию (КП50 / артикул неизвестен)
+(setq *mk:allowance-kp50k*      25.0)   ; КП50К
 ;; Припуск по артикулу профиля: ((маска . припуск) ...), маска — wcmatch,
 ;; ВЕРХНИЙ регистр. Проверяется раньше значения по умолчанию.
 ;; Пример для разных систем:
 ;;   (setq *mk:beam-allowance-by-article*
 ;;     '(("КП50К*" . 25.0) ("КП453*" . 25.0)))
 (setq *mk:beam-allowance-by-article* nil)
+;; Артикулы системы КП50К (из «База СИАЛ.xlsx», лист «База СИАЛ КП50К»;
+;; артикулы, общие для обеих систем, в список не входят)
+(setq *mk:articles-kp50k*
+  '(
+    "КП45366" "КП45367" "КП45369" "КП45370"
+    "КП45371" "КП45372" "КП45392" "КП45453"
+    "КП45548" "КП45550" "КПС014" "КПС030"
+    "КПС1161" "КПС1163" "КПС344" "КПС345"
+    "КПС370" "КПС371" "КПС372" "КПС437"
+    "КПС439" "КПС45453" "КПС475" "КПС584"
+    "КПС586" "КПС633" "КПС634" "КПС636"
+    "КПС718" "КПС801" "КПС818" "КПС829"
+    "КПС919" "КПС921" "КПС924" "КПС926"
+    "КПС998"
+  ))
 ;; Пакетный режим (команда МАРКАВ): общая выборка, один UNDO, без повторных вопросов
 (setq *mk:batch*                nil)
 (setq *mk:batch-ss*             nil)
@@ -2911,24 +2931,32 @@
 
 (defun mk:tab-int (x) (itoa (fix (+ (float x) 0.5))))
 
-;; Припуск для конкретного артикула
+;; Припуск для конкретного артикула:
+;; 1) явная маска из *mk:beam-allowance-by-article*;
+;; 2) артикул системы КП50К -> *mk:allowance-kp50k* (25 мм);
+;; 3) иначе (КП50 либо артикул неизвестен) -> *mk:beam-allowance* (0).
 (defun mk:beam-allowance-for (art / k out)
   (setq k (mk:art-key art) out nil)
   (if (> (strlen k) 0)
-    (foreach pair *mk:beam-allowance-by-article*
-      (if (and (null out) (wcmatch k (strcase (car pair))))
-        (setq out (cdr pair)))))
+    (progn
+      (foreach pair *mk:beam-allowance-by-article*
+        (if (and (null out) (wcmatch k (strcase (car pair))))
+          (setq out (cdr pair))))
+      (if (and (null out) (member k *mk:articles-kp50k*))
+        (setq out *mk:allowance-kp50k*))))
   (if (numberp out) out *mk:beam-allowance*))
 
 ;; Длина профиля ригеля = нарисованный размер + припуск
-(defun mk:beam-cut-len (len / art)
+(defun mk:beam-cut-len (len)
   (if (numberp len) (+ (float len) *mk:beam-allowance*) 0.0))
 
+;; Вертикальный ригель («т») считается как КП50 — без припуска
 (defun mk:beam-cut-len-el (el / len)
   (setq len (mk:rec-get el 'LENGTH))
-  (if (numberp len)
-    (+ (float len) (mk:beam-allowance-for (mk:rec-get el 'ARTICLE)))
-    0.0))
+  (cond
+    ((not (numberp len)) 0.0)
+    ((mk:rec-get el 'VERT) (float len))
+    (t (+ (float len) (mk:beam-allowance-for (mk:rec-get el 'ARTICLE))))))
 
 (defun mk:tab-mp (len cnt) (/ (* (float len) cnt) 1000.0))
 
