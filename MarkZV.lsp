@@ -155,6 +155,117 @@
 (setq *mk:thick-cold-max*       32.0)
 
 ;;;=====================================================================
+;;; 2a. БАЗА СИАЛ — ГАБАРИТ СЕЧЕНИЯ ПРОФИЛЯ, мм
+;;;   Источник: "База СИАЛ.xlsx", листы "База СИАЛ КП50" и "База СИАЛ КП50К",
+;;;   разделы "Стойка" и "Ригель" (колонка "Габарит").
+;;;   Сгенерировано tools/sial_parse.py --emit.
+;;;=====================================================================
+(setq *mk:sial-sizes*
+  '(
+    ("КП45453" . 21.0)
+    ("КПС993" . 23.0)
+    ("КП45367" . 27.0)
+    ("КП45371" . 46.0)
+    ("КПС372" . 46.0)
+    ("КП45388" . 48.0)
+    ("КПС009БЕЗУСОВ" . 54.0)
+    ("КП45369" . 68.0)
+    ("КПС371" . 68.0)
+    ("КП45303-2" . 70.0)
+    ("КП45303-3" . 70.0)
+    ("КПС180" . 70.0)
+    ("КП45366" . 76.0)
+    ("КПС998" . 76.0)
+    ("КПС913" . 86.0)
+    ("КП45304" . 88.0)
+    ("КПС919" . 90.0)
+    ("КПС921" . 90.0)
+    ("КПС1209" . 94.0)
+    ("КПС1067" . 98.0)
+    ("КП45302-1" . 100.0)
+    ("КП45302-2" . 100.0)
+    ("КП45370" . 104.0)
+    ("КПС1272ОБЛЕГЧ." . 104.0)
+    ("КПС818" . 104.0)
+    ("КПС1164" . 106.0)
+    ("КПС1161" . 110.0)
+    ("КПС1163" . 110.0)
+    ("КПС298ГН.УСЫ" . 114.0)
+    ("КП45551" . 116.0)
+    ("КП45551-3" . 116.0)
+    ("КП45548" . 120.0)
+    ("КП45550" . 120.0)
+    ("КПС1275ОБЛЕГЧ." . 120.0)
+    ("КП45562" . 128.0)
+    ("КПС1165" . 130.0)
+    ("КПС299ГН.УСЫ" . 130.0)
+    ("КП45387" . 144.0)
+    ("КП45372" . 148.0)
+    ("КПС344" . 148.0)
+    ("КПС491УГЛ." . 148.0)
+    ("КПС927" . 152.0)
+    ("КПС924" . 155.0)
+    ("КПС926" . 155.0)
+    ("КПС492ГН.УСЫ" . 158.0)
+    ("КПС584" . 165.0)
+    ("КПС586" . 165.0)
+    ("КП45364" . 172.0)
+    ("КП45392" . 178.0)
+    ("КПС345" . 178.0)
+    ("КПС494ГН.УСЫ" . 187.0)
+    ("КПС170" . 200.0)
+    ("КПС634" . 205.0)
+    ("КПС636" . 205.0)
+    ("КПС015" . 210.0)
+    ("КПС014" . 215.0)
+    ("КПС475" . 215.0)
+    ("КПС496ГН.УСЫ" . 224.0)
+    ("КПС171" . 235.0)
+    ("КПС370" . 240.0)
+    ("КПС426" . 240.0)
+    ("КПС718" . 240.0)
+    ("КПС1025ГН.УСЫ" . 250.0)
+    ("КПС633" . 270.0)
+    ("КПС829" . 270.0)
+    ("КПС437" . 280.0)
+    ("КПС439" . 280.0)
+    ("КПС801" . 280.0)
+   )
+)
+
+;; Ключ артикула: без пробелов, в верхнем регистре ("КПС 993" -> "КПС993")
+(defun mk:art-key (s / out i c)
+  (if (null s)
+    ""
+    (progn
+      (setq out "" i 1)
+      (while (<= i (strlen s))
+        (setq c (substr s i 1))
+        (if (and (/= c " ") (/= c "\t")) (setq out (strcat out c)))
+        (setq i (1+ i)))
+      (strcase out))))
+
+;; Габарит сечения профиля по базе СИАЛ; nil, если артикул не найден.
+;; Сначала точное совпадение, затем исполнение профиля: "КП45303" -> "КП45303-2".
+(defun mk:sial-size (art / k hit out)
+  (setq k (mk:art-key art) out nil)
+  (if (> (strlen k) 0)
+    (progn
+      (setq hit (assoc k *mk:sial-sizes*))
+      (if hit
+        (setq out (cdr hit))
+        (foreach pair *mk:sial-sizes*
+          (if (and (null out)
+                   (= (substr (car pair) 1 (1+ (strlen k))) (strcat k "-")))
+            (setq out (cdr pair)))))))
+  out)
+
+;; Габарит сечения: база СИАЛ в приоритете, иначе замер по блоку
+(defun mk:cross-size (el / s)
+  (setq s (mk:sial-size (mk:rec-get el 'ARTICLE)))
+  (if s s (if (numberp (mk:rec-get el 'CROSS)) (mk:rec-get el 'CROSS) 0.0)))
+
+;;;=====================================================================
 ;;; 2. УТИЛИТЫ
 ;;;=====================================================================
 (defun mk:strp (x) (and x (eq (type x) 'STR)))
@@ -1273,7 +1384,10 @@
         (write-line (strcat "  PROTRUDING: " (if (cdr (assoc 'PROTRUDING post)) "ДА" "НЕТ")) f)
         (write-line (strcat "  СЛЕВА:  " (if (cdr (assoc 'LEFT_TYPES post))  (cdr (assoc 'LEFT_TYPES post))  "?")) f)
         (write-line (strcat "  СПРАВА: " (if (cdr (assoc 'RIGHT_TYPES post)) (cdr (assoc 'RIGHT_TYPES post)) "?")) f)
-        (write-line (strcat "  СЕЧЕНИЕ: " (vl-prin1-to-string (cdr (assoc 'CROSS post)))) f)
+        (write-line (strcat "  СЕЧЕНИЕ: " (vl-prin1-to-string (cdr (assoc 'CROSS post)))
+                            "  (СИАЛ: " (if (mk:sial-size (cdr (assoc 'ARTICLE post)))
+                                          (rtos (mk:sial-size (cdr (assoc 'ARTICLE post))) 2 1)
+                                          "нет") ")") f)
         (write-line (strcat "  LEFT_CONN: " (itoa (length (cdr (assoc 'LEFT_CONN post))))) f)
         (write-line (strcat "  RIGHT_CONN: " (itoa (length (cdr (assoc 'RIGHT_CONN post))))) f)
         (write-line "" f))
@@ -1288,7 +1402,10 @@
         (write-line (strcat "  СУФФИКС: " (if (and (cdr (assoc 'SUFFIX beam))
                                                    (> (strlen (cdr (assoc 'SUFFIX beam))) 0))
                                             (cdr (assoc 'SUFFIX beam)) "нет")) f)
-        (write-line (strcat "  СЕЧЕНИЕ: " (vl-prin1-to-string (cdr (assoc 'CROSS beam)))) f)
+        (write-line (strcat "  СЕЧЕНИЕ: " (vl-prin1-to-string (cdr (assoc 'CROSS beam)))
+                            "  (СИАЛ: " (if (mk:sial-size (cdr (assoc 'ARTICLE beam)))
+                                          (rtos (mk:sial-size (cdr (assoc 'ARTICLE beam))) 2 1)
+                                          "нет") ")") f)
         (write-line (strcat "  СТОЛБЕЦ: " (if (cdr (assoc 'BAY beam))
                                             (itoa (cdr (assoc 'BAY beam))) "?")) f)
         (write-line (strcat "  РАЗМЕР: " (if (and (cdr (assoc 'SIZE_MARK beam))
@@ -1554,9 +1671,9 @@
   (setq out nil)
   (foreach el elements
     (setq art   (if (mk:rec-get el 'ARTICLE) (mk:rec-get el 'ARTICLE) "БЕЗ_АРТИКУЛА")
-          cross (mk:rec-get el 'CROSS))
+          cross (mk:cross-size el))
     (if (null (assoc art out))
-      (setq out (cons (cons art (if (numberp cross) cross 0.0)) out))))
+      (setq out (cons (cons art cross) out))))
   (reverse out))
 
 ;; Таблица артикул -> "м"/"б": по габариту сечения (минимальный/максимальный).
@@ -1566,11 +1683,16 @@
   (if (> (length pairs) 1)
     (progn
       (setq sorted (vl-sort pairs '(lambda (a b) (< (cdr a) (cdr b)))))
-      (setq out (list (cons (car (car sorted))          *mk:suffix-small*)
-                      (cons (car (last sorted))         *mk:suffix-big*)))
-      (if (> (length pairs) 2)
-        (prompt (strcat "\n  [WARN] Артикулов ригелей: " (itoa (length pairs))
-                        " — маркеры м/б присвоены только крайним по габариту.")))))
+      (if (or (< (length sorted) 2)
+              (equal (cdr (car sorted)) (cdr (last sorted)) *mk:tol-size*))
+        (prompt (strcat "\n  [WARN] Габариты сечений артикулов ригелей одинаковы"
+                        " — маркеры м/б не присвоены. Задайте *mk:article-size*."))
+        (progn
+          (setq out (list (cons (car (car sorted))  *mk:suffix-small*)
+                          (cons (car (last sorted)) *mk:suffix-big*)))
+          (if (> (length pairs) 2)
+            (prompt (strcat "\n  [WARN] Артикулов ригелей: " (itoa (length pairs))
+                            " — маркеры м/б присвоены только крайним по габариту.")))))))
   out)
 
 (defun mk:size-mark (art table)
