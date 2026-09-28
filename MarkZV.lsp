@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "1.4")
+(setq *mk:ver*            "1.5")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -147,8 +147,13 @@
 ;; Ручная таблица артикул -> "м"/"б" (приоритет над автоопределением по габариту).
 ;; Заполняется из базы СИАЛ: (("КП45551" . "м") ("КП45364" . "б"))
 (setq *mk:article-size*         nil)
-(setq *mk:group-model*          "MK_MODEL")
-(setq *mk:group-test*           "MK_TEST_MODEL")
+(setq *mk:layer-model*          "Сетка витража")
+(setq *mk:layer-test*           "Сетка витража тест")
+(setq *mk:group-model*          "Сетка_витража")        ; имя группы — без пробелов
+(setq *mk:group-test*           "Сетка_витража_тест")
+;; Припуск длины ригеля относительно светового проёма (СИАЛ КП50/КП50К):
+;; +12.5 мм на сторону, итого +25 мм к длине мультилинии/динамики.
+(setq *mk:beam-allowance*       25.0)
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -1134,6 +1139,19 @@
 ;; Все создаваемые объекты копятся, чтобы собрать их в группу
 (setq *mk:drawn* nil)
 
+;; Создание слоя через таблицу символов: имя может содержать пробелы,
+;; поэтому (command "_.LAYER" ...) не годится — пробел там = Enter.
+(defun mk:ensure-layer (name color)
+  (if (null (tblsearch "LAYER" name))
+    (entmake (list '(0 . "LAYER")
+                   '(100 . "AcDbSymbolTableRecord")
+                   '(100 . "AcDbLayerTableRecord")
+                   (cons 2 name)
+                   (cons 70 0)
+                   (cons 62 color)
+                   '(6 . "Continuous"))))
+  name)
+
 (defun mk:emk (dxf / e)
   (setq e (entmakex dxf))
   (if e (setq *mk:drawn* (cons e *mk:drawn*)))
@@ -1214,10 +1232,9 @@
                   (cons 10 (list min-x max-y)))))
 
 (defun mk:draw-model (posts beams fills windows doors bounds / layer prev-layer)
-  (setq layer "MK_MODEL")
+  (setq layer *mk:layer-model*)
   (setq *mk:drawn* nil)
-  (if (null (tblsearch "LAYER" layer))
-    (command "_.LAYER" "_N" layer "_C" "7" layer ""))
+  (mk:ensure-layer layer 7)
   (setq prev-layer (getvar "CLAYER"))
   (setvar "CLAYER" layer)
   (mk:draw-bounds bounds)
@@ -1335,10 +1352,9 @@
                       '(62 . 3))))))
 
 (defun mk:draw-test-model (posts beams fills windows doors bounds / layer prev-layer)
-  (setq layer "MK_TEST_MODEL")
+  (setq layer *mk:layer-test*)
   (setq *mk:drawn* nil)
-  (if (null (tblsearch "LAYER" layer))
-    (command "_.LAYER" "_N" layer "_C" "7" layer ""))
+  (mk:ensure-layer layer 7)
   (setq prev-layer (getvar "CLAYER"))
   (setvar "CLAYER" layer)
   (mk:draw-bounds bounds)
@@ -1395,7 +1411,9 @@
       (foreach beam beams
         (write-line (strcat "  INS_PT: " (vl-prin1-to-string (cdr (assoc 'INS_PT beam)))) f)
         (write-line (strcat "  LENGTH: " (vl-prin1-to-string (cdr (assoc 'LENGTH beam)))
-                            "  (источник: " (if (cdr (assoc 'SIZE_SRC beam)) (cdr (assoc 'SIZE_SRC beam)) "НЕТ") ")") f)
+                            "  (источник: " (if (cdr (assoc 'SIZE_SRC beam)) (cdr (assoc 'SIZE_SRC beam)) "НЕТ") ")"
+                            "  ПРОФИЛЬ: " (if (cdr (assoc 'LENGTH beam))
+                                            (rtos (mk:beam-cut-len (cdr (assoc 'LENGTH beam))) 2 1) "?")) f)
         (write-line (strcat "  АРТИКУЛ: " (if (cdr (assoc 'ARTICLE beam)) (cdr (assoc 'ARTICLE beam)) "НЕТ")) f)
         (write-line (strcat "  TOP_ELEM: " (if (cdr (assoc 'TOP_ELEM beam)) "Есть" "Нет")) f)
         (write-line (strcat "  BOT_ELEM: " (if (cdr (assoc 'BOT_ELEM beam)) "Есть" "Нет")) f)
@@ -1406,6 +1424,8 @@
                             "  (СИАЛ: " (if (mk:sial-size (cdr (assoc 'ARTICLE beam)))
                                           (rtos (mk:sial-size (cdr (assoc 'ARTICLE beam))) 2 1)
                                           "нет") ")") f)
+        (write-line (strcat "  ДЛИНА №: " (if (cdr (assoc 'LEN_IDX beam))
+                                            (itoa (cdr (assoc 'LEN_IDX beam))) "?")) f)
         (write-line (strcat "  РЯД: " (if (cdr (assoc 'ROW beam))
                                         (itoa (cdr (assoc 'ROW beam))) "?")
                             "   СТОЛБЕЦ: " (if (cdr (assoc 'BAY beam))
@@ -1669,6 +1689,31 @@
   (/ (+ (car r) (cadr r)) 2.0))
 
 ;; Уникальные пары (артикул . габарит сечения) в порядке появления
+;; Шкала размеров «в свету»: уникальные длины ригелей и ширины заполнений,
+;; по возрастанию. Индекс в этой шкале и есть цифра марки ригеля —
+;; так она совпадает с цифрой марки заполнения (в MarkZ: номер = ширина).
+(defun mk:length-scale (beams panels / vals v out)
+  (setq vals nil)
+  (foreach b beams
+    (setq v (mk:rec-get b 'LENGTH))
+    (if (numberp v) (setq vals (cons (atof (mk:size-key v)) vals))))
+  (foreach pn panels
+    (if (= (mk:rec-get pn 'TYPE) "ЗАПОЛНЕНИЕ")
+      (progn
+        (setq v (mk:rec-get pn 'WIDTH))
+        (if (numberp v) (setq vals (cons (atof (mk:size-key v)) vals))))))
+  (setq out nil)
+  (foreach v (vl-sort vals '<)
+    (if (not (member v out)) (setq out (cons v out))))
+  (reverse out))
+
+(defun mk:scale-index (v scale / i idx)
+  (setq i 1 idx 0)
+  (foreach s scale
+    (if (and (= idx 0) (equal s v *mk:tol-size*)) (setq idx i))
+    (setq i (1+ i)))
+  idx)
+
 ;; Уровни ригелей (горизонтальные ряды) снизу вверх
 (defun mk:row-levels (beams / ys sorted out last)
   (setq ys nil)
@@ -1725,10 +1770,12 @@
 
 ;; Разметка ригелей: TOP_ELEM / BOT_ELEM / SUFFIX / BAY / SIZE_MARK / GROUP_KEY
 (defun mk:annotate-beams (beams all-panels doors bounds posts /
-                          out suffix len art axes table mark bay rows row)
+                          out suffix len art axes table mark bay rows row
+                          scale lq)
   (setq out   nil
         axes  (mk:post-axes posts)
         rows  (mk:row-levels beams)
+        scale (mk:length-scale beams all-panels)
         table (mk:size-mark-table beams))
   (foreach beam beams
     (setq beam (mk:rec-put beam 'TOP_ELEM (mk:find-top-element beam all-panels)))
@@ -1742,7 +1789,9 @@
     (setq row (mk:row-index (cadr (cdr (assoc 'INS_PT beam))) rows))
     (setq beam (mk:rec-put beam 'BAY bay))
     (setq beam (mk:rec-put beam 'ROW row))
-    (setq beam (mk:rec-put beam 'LEN_Q (atof len)))
+    (setq lq (atof len))
+    (setq beam (mk:rec-put beam 'LEN_Q lq))
+    (setq beam (mk:rec-put beam 'LEN_IDX (mk:scale-index lq scale)))
     (setq beam (mk:rec-put beam 'SIZE_MARK mark))
     (setq beam (mk:rec-put beam 'GROUP_KEY (strcat len "_" art "_" suffix)))
     (setq out (cons beam out)))
@@ -1766,41 +1815,33 @@
   (reverse plan))
 
 
-;; Ригели: одна цифра на горизонтальный ряд (уровень Y), нумерация снизу вверх —
-;; чтобы цифра совпадала с номером ряда заполнений.
-;; Внутри ряда: если длины разные — индекс длины "-N" (по возрастанию длины),
-;; далее маркер размера профиля (м/б) и суффикс окружения.
-(defun mk:plan-beams (beams prefix / plan idx rows row grp lens lidx li sub k
-                        mark base used n)
-  (setq beams (mk:sort-xy beams) plan nil idx 1 used nil)
-  (setq rows (vl-sort (mk:unique-keys beams 'ROW) '<))
-  (if (member 0 rows)
-    (setq rows (append (vl-remove 0 rows) (list 0))))
-  (foreach row rows
-    (setq grp  (mk:filter-by beams 'ROW row)
-          lens (vl-sort (mk:unique-keys grp 'LEN_Q) '<))
-    (setq lidx 0)
-    (foreach li lens
-      (setq lidx (1+ lidx))
-      (foreach k (mk:unique-keys (mk:filter-by grp 'LEN_Q li) 'GROUP_KEY)
-        (setq sub (mk:filter-by (mk:filter-by grp 'LEN_Q li) 'GROUP_KEY k))
-        (setq mark (strcat prefix " Рг" (itoa idx)
-                           (if (> (length lens) 1) (strcat "-" (itoa lidx)) "")
-                           (if (mk:rec-get (car sub) 'SIZE_MARK)
-                             (mk:rec-get (car sub) 'SIZE_MARK) "")
-                           (if (mk:rec-get (car sub) 'SUFFIX)
-                             (mk:rec-get (car sub) 'SUFFIX) "")))
-        ;; финальная защита от совпадения марок
-        (if (member mark used)
-          (progn
-            (setq base mark n 2)
-            (while (member (strcat base "*" (itoa n)) used) (setq n (1+ n)))
-            (setq mark (strcat base "*" (itoa n)))
-            (prompt (strcat "\n  [WARN] Ряд " (itoa idx)
-                            ": разные группы дают одну марку — выдана " mark))))
-        (setq used (cons mark used))
-        (setq plan (cons (list mark sub) plan))))
-    (setq idx (1+ idx)))
+;; Ригели: цифра марки = индекс длины ригеля в шкале размеров «в свету»
+;; (от минимальной к максимальной) — та же цифра, что у заполнения в MarkZ
+;; ("номер = ширина"). Далее маркер размера профиля (м/б) и суффикс окружения.
+(defun mk:plan-beams (beams prefix / plan idxs idx grp k sub mark base used n)
+  (setq beams (mk:sort-xy beams) plan nil used nil)
+  (setq idxs (vl-sort (mk:unique-keys beams 'LEN_IDX) '<))
+  (if (member 0 idxs)
+    (setq idxs (append (vl-remove 0 idxs) (list 0))))
+  (foreach idx idxs
+    (setq grp (mk:filter-by beams 'LEN_IDX idx))
+    (foreach k (mk:unique-keys grp 'GROUP_KEY)
+      (setq sub  (mk:filter-by grp 'GROUP_KEY k)
+            mark (strcat prefix " Рг" (itoa idx)
+                         (if (mk:rec-get (car sub) 'SIZE_MARK)
+                           (mk:rec-get (car sub) 'SIZE_MARK) "")
+                         (if (mk:rec-get (car sub) 'SUFFIX)
+                           (mk:rec-get (car sub) 'SUFFIX) "")))
+      ;; защита от совпадения марок разных групп
+      (if (member mark used)
+        (progn
+          (setq base mark n 2)
+          (while (member (strcat base "*" (itoa n)) used) (setq n (1+ n)))
+          (setq mark (strcat base "*" (itoa n)))
+          (prompt (strcat "\n  [WARN] Длина №" (itoa idx)
+                          ": разные группы дают одну марку — выдана " mark))))
+      (setq used (cons mark used))
+      (setq plan (cons (list mark sub) plan))))
   (reverse plan))
 
 ;;;---------------------------------------------------------------------
@@ -2155,6 +2196,10 @@
 
 (defun mk:tab-int (x) (itoa (fix (+ (float x) 0.5))))
 
+;; Длина профиля ригеля = размер в свету + припуск (12.5 мм на сторону)
+(defun mk:beam-cut-len (len)
+  (if (numberp len) (+ (float len) *mk:beam-allowance*) 0.0))
+
 (defun mk:tab-mp (len cnt) (/ (* (float len) cnt) 1000.0))
 
 ;; Записи: (ранг раздел артикул марка длина)
@@ -2170,7 +2215,7 @@
     (setq out (cons (list 2 "Ригели"
                           (if (mk:rec-get el 'ARTICLE) (mk:rec-get el 'ARTICLE) "—")
                           (mk:read-mark el)
-                          (if (mk:rec-get el 'LENGTH) (mk:rec-get el 'LENGTH) 0.0))
+                          (mk:beam-cut-len (mk:rec-get el 'LENGTH)))
                     out)))
   (reverse out))
 
