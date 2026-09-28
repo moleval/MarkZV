@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "1.8")
+(setq *mk:ver*            "1.9")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -347,8 +347,19 @@
 ;;;=====================================================================
 ;;; 3. ИЗВЛЕЧЕНИЕ АТРИБУТОВ
 ;;;=====================================================================
+;; У обычных объектов (MLINE, LINE, LWPOLYLINE…) entnext возвращает СЛЕДУЮЩИЙ
+;; объект чертежа, а не подобъект. Без этой проверки обход уходил в соседние
+;; блоки и читал/писал ЧУЖИЕ атрибуты «Марка».
+(defun mk:has-attrs-insert? (ename / ed)
+  (setq ed (if ename (entget ename) nil))
+  (and ed
+       (= (cdr (assoc 0 ed)) "INSERT")
+       (equal (cdr (assoc 66 ed)) 1)))
+
 (defun mk:get-attr (ename tag / sub data val)
-  (setq sub (entnext ename) val nil)
+  (if (not (mk:has-attrs-insert? ename))
+    (setq sub nil val nil)
+    (setq sub (entnext ename) val nil))
   (while sub
     (setq data (entget sub))
     (cond
@@ -374,7 +385,9 @@
   (reverse attrs))
 
 (defun mk:has-attr? (ename tag / sub data found)
-  (setq sub (entnext ename) found nil)
+  (if (not (mk:has-attrs-insert? ename))
+    (setq sub nil found nil)
+    (setq sub (entnext ename) found nil))
   (while (and sub (not found))
     (setq data (entget sub))
     (cond
@@ -663,6 +676,43 @@
 ;;;   LINE / LWPOLYLINE / POLYLINE / MLINE + блоки стоек и ригелей.
 ;;;   Донор идеи: mark:fill-extract-segs / mark:fill-verts-to-segs (MarkZ).
 ;;;---------------------------------------------------------------------
+;; Артикул профиля из строки: «Стойка КП45302 …» -> «КП45302», «КПС 1155» -> «КПС1155»
+(defun mk:article-from-name (s / up n i c out j ch)
+  (setq out nil)
+  (if (mk:strp s)
+    (progn
+      (setq up (strcase s) n (strlen up) i 1)
+      (while (and (<= i (1- n)) (null out))
+        (if (or (= (substr up i 2) "КП") (= (substr up i 2) "KP"))
+          (progn
+            (setq out "КП" j (+ i 2))
+            ;; необязательная «С» и пробелы
+            (if (= (substr up j 1) "С")
+              (progn (setq out (strcat out "С")) (setq j (1+ j))))
+            (while (= (substr up j 1) " ") (setq j (1+ j)))
+            (setq ch (substr up j 1))
+            (if (or (= ch "") (null (member ch '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9"))))
+              (setq out nil)                     ; «КП» без цифр — не артикул
+              (progn
+                (while (member (substr up j 1)
+                               '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "-"))
+                  (setq out (strcat out (substr up j 1)) j (1+ j)))
+                ;; хвостовой дефис не нужен
+                (if (= (substr out (strlen out) 1) "-")
+                  (setq out (substr out 1 (1- (strlen out)))))))))
+        (setq i (1+ i)))))
+  out)
+
+;; Артикул источника: имя стиля мультилинии (DXF 2), иначе имя слоя
+(defun mk:ent-article (e / ed a)
+  (setq ed (if e (entget e) nil) a nil)
+  (if ed
+    (progn
+      (if (= (cdr (assoc 0 ed)) "MLINE")
+        (setq a (mk:article-from-name (cdr (assoc 2 ed)))))
+      (if (null a) (setq a (mk:article-from-name (cdr (assoc 8 ed)))))))
+  a)
+
 ;; Отрезки одного объекта: список (x0 y0 x1 y1)
 (defun mk:ent-segs (e / ed typ verts closed segs p sub)
   (setq ed (entget e) segs nil)
@@ -790,7 +840,8 @@
         (cons 'TYPE "СТОЙКА") (cons 'ENAME (nth 0 tr))
         (cons 'INS_PT (list ax s0 0.0))
         (cons 'LENGTH (- s1 s0)) (cons 'SIZE_SRC "GEOM")
-        (cons 'CROSS cross) (cons 'ARTICLE nil) (cons 'VISIBILITY nil)
+        (cons 'CROSS cross) (cons 'ARTICLE (mk:ent-article (nth 0 tr)))
+        (cons 'VISIBILITY nil)
         (cons 'LEFT_CONN nil) (cons 'RIGHT_CONN nil) (cons 'PROTRUDING nil)
       ) posts))))
   (foreach grp (mk:merge-tracks hrecs *mk:join-beams-gap*)
@@ -801,7 +852,8 @@
         (cons 'TYPE "РИГЕЛЬ") (cons 'ENAME (nth 0 tr))
         (cons 'INS_PT (list s0 ax 0.0))
         (cons 'LENGTH (- s1 s0)) (cons 'SIZE_SRC "GEOM")
-        (cons 'CROSS cross) (cons 'ARTICLE nil) (cons 'VISIBILITY nil)
+        (cons 'CROSS cross) (cons 'ARTICLE (mk:ent-article (nth 0 tr)))
+        (cons 'VISIBILITY nil)
         (cons 'TOP_ELEM nil) (cons 'BOT_ELEM nil) (cons 'SUFFIX nil)
       ) beams))))
   (prompt (strcat "\n  Все-типы: отрезков " (itoa (length segs))
@@ -1700,7 +1752,9 @@
 ;;; 18. АВТОЗАПОЛНЕНИЕ АТРИБУТОВ
 ;;;=====================================================================
 (defun mk:set-attr (ename tag newval / sub data done)
-  (setq sub (entnext ename) done nil)
+  (if (not (mk:has-attrs-insert? ename))
+    (setq sub nil done nil)
+    (setq sub (entnext ename) done nil))
   (while (and sub (not done))
     (setq data (entget sub))
     (cond
@@ -2134,7 +2188,7 @@
   nil)
 
 ;; Запись марки по группе; возвращает (записано пропущено)
-;; Правый верхний угол элемента (стойка — по оси + полсечения, ригель — конец)
+;; Правый верхний угол элемента (запасной вариант, если образца нет)
 (defun mk:elem-top-right (el / p len cross type)
   (setq p     (cdr (assoc 'INS_PT el))
         len   (if (cdr (assoc 'LENGTH el)) (cdr (assoc 'LENGTH el)) 0.0)
@@ -2146,24 +2200,128 @@
       (list (+ (car p) (/ cross 2.0)) (+ (cadr p) len))
       (list (+ (car p) len) (+ (cadr p) (/ cross 2.0))))))
 
-;; Выноска марки для элемента без атрибута «Марка»
+;;;---------------------------------------------------------------------
+;;; Образцы подписей: берутся из ATTDEF динамических блоков «Стойка»/«Ригель»
+;;; (стиль, высота, поворот, выравнивание и смещение относительно вставки).
+;;;---------------------------------------------------------------------
+(setq *mk:proto-cache* nil)
 (setq *mk:labels* nil)
 
-(defun mk:label-mark (el mark-str / pt e)
-  (setq pt (mk:elem-top-right el))
-  (if (null pt)
+;; Имя определения блока по маске
+(defun mk:find-block-def (mask / def out nm)
+  (setq out nil def (tblnext "BLOCK" T))
+  (while (and def (null out))
+    (setq nm (cdr (assoc 2 def)))
+    (if (and (mk:strp nm) (wcmatch (strcase nm) (strcase mask)))
+      (setq out nm))
+    (setq def (tblnext "BLOCK")))
+  out)
+
+;; Параметры ATTDEF с заданным тегом внутри определения блока
+(defun mk:attdef-proto (blkname tag / e ed out)
+  (setq out nil)
+  (if (and blkname (setq e (tblobjname "BLOCK" blkname)))
+    (progn
+      (setq e (entnext e))
+      (while (and e (null out))
+        (setq ed (entget e))
+        (cond
+          ((null ed) (setq e nil))
+          ((and (= (cdr (assoc 0 ed)) "ATTDEF")
+                (mk:name= (cdr (assoc 2 ed)) tag))
+           (setq out (list
+             (cons 'PT    (cdr (assoc 10 ed)))
+             (cons 'PT2   (cdr (assoc 11 ed)))
+             (cons 'H     (if (cdr (assoc 40 ed)) (cdr (assoc 40 ed)) *mk:label-height*))
+             (cons 'STYLE (cdr (assoc 7 ed)))
+             (cons 'ROT   (if (cdr (assoc 50 ed)) (cdr (assoc 50 ed)) 0.0))
+             (cons 'J72   (if (cdr (assoc 72 ed)) (cdr (assoc 72 ed)) 0))
+             (cons 'J74   (if (cdr (assoc 74 ed)) (cdr (assoc 74 ed)) 0))
+             (cons 'WID   (if (cdr (assoc 41 ed)) (cdr (assoc 41 ed)) 1.0))
+             (cons 'COLOR (cdr (assoc 62 ed))))))
+          (t nil))
+        (if e (setq e (entnext e))))))
+  out)
+
+;; Кэш: (тип элемента + тег) -> образец
+(defun mk:proto-for (type tag / key hit blk mask)
+  (setq key (strcat type "|" tag)
+        hit (assoc key *mk:proto-cache*))
+  (if hit
+    (cdr hit)
+    (progn
+      (setq mask (strcat "*" (if (= type "СТОЙКА") *mk:block-post* *mk:block-beam*) "*")
+            blk  (mk:find-block-def mask)
+            hit  (if blk (mk:attdef-proto blk tag) nil))
+      (setq *mk:proto-cache* (cons (cons key hit) *mk:proto-cache*))
+      hit)))
+
+;; Текст по образцу ATTDEF: смещение образца отсчитывается от точки вставки
+(defun mk:label-by-proto (proto base str / pt pt2 dxf)
+  (if (null proto)
+    nil
+    (progn
+      (setq pt  (list (+ (car base)  (car  (cdr (assoc 'PT proto))))
+                      (+ (cadr base) (cadr (cdr (assoc 'PT proto)))) 0.0))
+      (setq pt2 (if (cdr (assoc 'PT2 proto))
+                  (list (+ (car base)  (car  (cdr (assoc 'PT2 proto))))
+                        (+ (cadr base) (cadr (cdr (assoc 'PT2 proto)))) 0.0)
+                  pt))
+      (setq dxf (list '(0 . "TEXT")
+                      (cons 8 *mk:layer-label*)
+                      (cons 10 pt)
+                      (cons 11 pt2)
+                      (cons 40 (cdr (assoc 'H proto)))
+                      (cons 41 (cdr (assoc 'WID proto)))
+                      (cons 50 (cdr (assoc 'ROT proto)))
+                      (cons 72 (cdr (assoc 'J72 proto)))
+                      (cons 74 (cdr (assoc 'J74 proto)))
+                      (cons 1 str)))
+      (if (mk:strp (cdr (assoc 'STYLE proto)))
+        (setq dxf (append dxf (list (cons 7 (cdr (assoc 'STYLE proto)))))))
+      (entmakex dxf))))
+
+;; Выноска: марка + артикул, по образцу атрибутов динамического блока
+(defun mk:label-mark (el mark-str / base type art e n pt)
+  (setq base (cdr (assoc 'INS_PT el))
+        type (cdr (assoc 'TYPE el))
+        art  (mk:rec-get el 'ARTICLE)
+        n    0)
+  (if (null base)
     nil
     (progn
       (mk:ensure-layer *mk:layer-label* 2)
-      (setq e (entmakex (list '(0 . "TEXT")
-                              (cons 8 *mk:layer-label*)
-                              (cons 10 (list (+ (car pt) *mk:label-offset*)
-                                             (+ (cadr pt) *mk:label-offset*) 0.0))
-                              (cons 40 *mk:label-height*)
-                              (cons 1 mark-str)
-                              '(62 . 2))))
-      (if e (setq *mk:labels* (cons e *mk:labels*)))
-      e)))
+      ;; марка
+      (setq e (mk:label-by-proto (mk:proto-for type *mk:attr-mark*) base mark-str))
+      (if (null e)
+        (progn                                   ; образца нет — правый верхний угол
+          (setq pt (mk:elem-top-right el))
+          (if pt
+            (setq e (entmakex (list '(0 . "TEXT")
+                                    (cons 8 *mk:layer-label*)
+                                    (cons 10 (list (+ (car pt) *mk:label-offset*)
+                                                   (+ (cadr pt) *mk:label-offset*) 0.0))
+                                    (cons 40 *mk:label-height*)
+                                    (cons 1 mark-str)
+                                    '(62 . 2)))))))
+      (if e (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n))))
+      ;; артикул
+      (if (and art (> (strlen art) 0))
+        (progn
+          (setq e (mk:label-by-proto (mk:proto-for type *mk:attr-article*) base art))
+          (if (null e)
+            (progn
+              (setq pt (mk:elem-top-right el))
+              (if pt
+                (setq e (entmakex (list '(0 . "TEXT")
+                                        (cons 8 *mk:layer-label*)
+                                        (cons 10 (list (+ (car pt) *mk:label-offset*)
+                                                       (- (cadr pt) (* 1.4 *mk:label-height*)) 0.0))
+                                        (cons 40 *mk:label-height*)
+                                        (cons 1 art)
+                                        '(62 . 2)))))))
+          (if e (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n))))))
+      (> n 0))))
 
 ;; Собрать все выноски чертежа в группу
 (defun mk:group-labels (/ ss i lst)
