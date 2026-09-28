@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "1.6")
+(setq *mk:ver*            "1.7")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -157,8 +157,17 @@
 ;; Пакетный режим (команда МАРКАВ): общая выборка, один UNDO, без повторных вопросов
 (setq *mk:batch*                nil)
 (setq *mk:batch-ss*             nil)
-(setq *mk:batch-mode*           nil)   ; "Блоки" / "Мультилинии" — режим каркаса
+(setq *mk:batch-mode*           nil)   ; "Блоки" / "Мультилинии" / "Все-типы"
+(setq *mk:scope-mode*           "Блоки") ; режим последнего сбора — его же берут МАРКАВСТ/МАРКАВРГ
 (setq *mk:batch-keep-grid*      nil)   ; оставлять ли сетку после пакета
+;; Режим «Все-типы»: слияние параллельных линий одного профиля и отсев мусора
+(setq *mk:merge-width*          200.0) ; макс. расстояние между линиями профиля
+(setq *mk:min-seg*              50.0)  ; короче — не элемент каркаса
+;; Выноски марок для элементов без атрибута «Марка»
+(setq *mk:layer-label*          "Марки выноски")
+(setq *mk:group-label*          "Марки_выноски")
+(setq *mk:label-height*         100.0)
+(setq *mk:label-offset*         50.0)
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -636,6 +645,181 @@
                         (cons 'SUFFIX nil)
                       ) beams))))))))))))
   (list (reverse posts) (reverse beams)))
+
+;;;---------------------------------------------------------------------
+;;; 8a. РЕЖИМ «ВСЕ-ТИПЫ»: КАРКАС ИЗ ЛЮБОЙ ГЕОМЕТРИИ ВЫБОРКИ
+;;;   LINE / LWPOLYLINE / POLYLINE / MLINE + блоки стоек и ригелей.
+;;;   Донор идеи: mark:fill-extract-segs / mark:fill-verts-to-segs (MarkZ).
+;;;---------------------------------------------------------------------
+;; Отрезки одного объекта: список (x0 y0 x1 y1)
+(defun mk:ent-segs (e / ed typ verts closed segs p sub)
+  (setq ed (entget e) segs nil)
+  (if (null ed)
+    nil
+    (progn
+      (setq typ (cdr (assoc 0 ed)))
+      (cond
+        ((= typ "LINE")
+         (setq p (cdr (assoc 10 ed)) sub (cdr (assoc 11 ed)))
+         (if (and p sub)
+           (setq segs (list (list (float (car p))   (float (cadr p))
+                                  (float (car sub)) (float (cadr sub)))))))
+        ((= typ "LWPOLYLINE")
+         (setq verts nil closed nil)
+         (if (and (cdr (assoc 70 ed)) (= 1 (logand 1 (cdr (assoc 70 ed)))))
+           (setq closed t))
+         (foreach p ed
+           (if (= (car p) 10)
+             (setq verts (cons (list (float (cadr p)) (float (caddr p))) verts))))
+         (setq verts (reverse verts))
+         (if closed (setq verts (append verts (list (car verts)))))
+         (if (>= (length verts) 2) (setq segs (mk:verts-to-segs verts))))
+        ((= typ "POLYLINE")
+         (setq verts nil closed nil)
+         (if (and (cdr (assoc 70 ed)) (= 1 (logand 1 (cdr (assoc 70 ed)))))
+           (setq closed t))
+         (setq sub (entnext e))
+         (while sub
+           (setq p (entget sub))
+           (if (or (null p) (= "SEQEND" (cdr (assoc 0 p))))
+             (setq sub nil)
+             (progn
+               (if (= "VERTEX" (cdr (assoc 0 p)))
+                 (setq verts (cons (list (float (cadr (assoc 10 p)))
+                                         (float (caddr (assoc 10 p)))) verts)))
+               (setq sub (entnext sub)))))
+         (setq verts (reverse verts))
+         (if closed (setq verts (append verts (list (car verts)))))
+         (if (>= (length verts) 2) (setq segs (mk:verts-to-segs verts))))
+        ((= typ "MLINE")
+         (setq verts (mk:get-mline-verts e))
+         (if (and verts (>= (length verts) 2))
+           (setq segs (mk:verts-to-segs verts))))
+        (t nil))
+      segs)))
+
+;; Все отрезки выборки (кроме блоков)
+(defun mk:collect-segs-in-ss (ss / i e typ out segs)
+  (setq out nil)
+  (if ss
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (setq e   (ssname ss i)
+              typ (cdr (assoc 0 (entget e))))
+        (if (member typ '("LINE" "LWPOLYLINE" "POLYLINE" "MLINE"))
+          (progn
+            (setq segs (mk:ent-segs e))
+            (foreach sg segs (setq out (cons (cons e sg) out)))))
+        (setq i (1+ i)))))
+  (reverse out))
+
+;; Слияние параллельных отрезков одного профиля:
+;; ось = среднее, протяжённость = объединение, сечение = разброс осей.
+;; rec: (ename ось нач кон)
+(defun mk:merge-tracks (recs / sorted out cur base ax a b)
+  (setq sorted (vl-sort recs '(lambda (p q) (< (nth 1 p) (nth 1 q))))
+        out nil cur nil)
+  (foreach r sorted
+    (if (and cur
+             (<= (- (nth 1 r) (nth 1 (car cur))) *mk:merge-width*)
+             (> (min (nth 3 r) (apply 'max (mapcar '(lambda (x) (nth 3 x)) cur)))
+                (max (nth 2 r) (apply 'min (mapcar '(lambda (x) (nth 2 x)) cur)))))
+      (setq cur (cons r cur))
+      (progn
+        (if cur (setq out (cons (reverse cur) out)))
+        (setq cur (list r)))))
+  (if cur (setq out (cons (reverse cur) out)))
+  (reverse out))
+
+(defun mk:track-elem (grp type / axs a0 a1 s0 s1 cross)
+  (setq axs   (mapcar '(lambda (x) (nth 1 x)) grp)
+        a0    (apply 'min axs)
+        a1    (apply 'max axs)
+        s0    (apply 'min (mapcar '(lambda (x) (nth 2 x)) grp))
+        s1    (apply 'max (mapcar '(lambda (x) (nth 3 x)) grp))
+        cross (- a1 a0))
+  (list (nth 0 (car grp))            ; ename (первый объект группы)
+        (/ (+ a0 a1) 2.0)            ; ось
+        s0 s1                        ; протяжённость
+        (if (> cross 1.0) cross 0.0) ; габарит сечения
+        type))
+
+;; Каркас из геометрии + блоков. Блоки в приоритете (у них артикул и «Марка»).
+(defun mk:extract-posts-beams-all (ss / segs vrecs hrecs cls len posts beams
+                                     bposts bbeams tr e ax s0 s1 cross)
+  (setq bposts (mapcar 'mk:collect-post
+                 (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
+        bbeams (mapcar 'mk:collect-beam
+                 (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*"))))
+  (setq segs (mk:collect-segs-in-ss ss) vrecs nil hrecs nil)
+  (foreach r segs
+    (setq e   (car r)
+          cls (mk:classify-seg (cdr r)))
+    (cond
+      ((= cls 'v)
+       (setq len (abs (- (nth 4 r) (nth 2 r))))
+       (if (> len *mk:min-seg*)
+         (setq vrecs (cons (list e (/ (+ (nth 1 r) (nth 3 r)) 2.0)
+                                 (min (nth 2 r) (nth 4 r))
+                                 (max (nth 2 r) (nth 4 r))) vrecs))))
+      ((= cls 'h)
+       (setq len (abs (- (nth 3 r) (nth 1 r))))
+       (if (> len *mk:min-seg*)
+         (setq hrecs (cons (list e (/ (+ (nth 2 r) (nth 4 r)) 2.0)
+                                 (min (nth 1 r) (nth 3 r))
+                                 (max (nth 1 r) (nth 3 r))) hrecs))))))
+  (setq posts nil beams nil)
+  (foreach grp (mk:merge-tracks vrecs)
+    (setq tr (mk:track-elem grp "СТОЙКА")
+          ax (nth 1 tr) s0 (nth 2 tr) s1 (nth 3 tr) cross (nth 4 tr))
+    (if (not (mk:elem-covered? ax s0 s1 bposts "СТОЙКА"))
+      (setq posts (cons (list
+        (cons 'TYPE "СТОЙКА") (cons 'ENAME (nth 0 tr))
+        (cons 'INS_PT (list ax s0 0.0))
+        (cons 'LENGTH (- s1 s0)) (cons 'SIZE_SRC "GEOM")
+        (cons 'CROSS cross) (cons 'ARTICLE nil) (cons 'VISIBILITY nil)
+        (cons 'LEFT_CONN nil) (cons 'RIGHT_CONN nil) (cons 'PROTRUDING nil)
+      ) posts))))
+  (foreach grp (mk:merge-tracks hrecs)
+    (setq tr (mk:track-elem grp "РИГЕЛЬ")
+          ax (nth 1 tr) s0 (nth 2 tr) s1 (nth 3 tr) cross (nth 4 tr))
+    (if (not (mk:elem-covered? ax s0 s1 bbeams "РИГЕЛЬ"))
+      (setq beams (cons (list
+        (cons 'TYPE "РИГЕЛЬ") (cons 'ENAME (nth 0 tr))
+        (cons 'INS_PT (list s0 ax 0.0))
+        (cons 'LENGTH (- s1 s0)) (cons 'SIZE_SRC "GEOM")
+        (cons 'CROSS cross) (cons 'ARTICLE nil) (cons 'VISIBILITY nil)
+        (cons 'TOP_ELEM nil) (cons 'BOT_ELEM nil) (cons 'SUFFIX nil)
+      ) beams))))
+  (prompt (strcat "\n  Все-типы: отрезков " (itoa (length segs))
+                  ", из геометрии стоек " (itoa (length posts))
+                  ", ригелей " (itoa (length beams))
+                  "; из блоков " (itoa (length bposts))
+                  "/" (itoa (length bbeams))))
+  (list (append bposts (reverse posts))
+        (append bbeams (reverse beams))))
+
+;; Совпадает ли геометрический элемент с уже собранным блоком
+(defun mk:elem-covered? (ax s0 s1 blocks type / hit p bx b0 b1)
+  (setq hit nil)
+  (foreach b blocks
+    (if (null hit)
+      (progn
+        (setq p (cdr (assoc 'INS_PT b)))
+        (if p
+          (progn
+            (if (= type "СТОЙКА")
+              (setq bx (car p)
+                    b0 (cadr p)
+                    b1 (+ (cadr p) (if (cdr (assoc 'LENGTH b)) (cdr (assoc 'LENGTH b)) 0.0)))
+              (setq bx (cadr p)
+                    b0 (car p)
+                    b1 (+ (car p) (if (cdr (assoc 'LENGTH b)) (cdr (assoc 'LENGTH b)) 0.0))))
+            (if (and (<= (abs (- ax bx)) *mk:merge-width*)
+                     (> (min s1 b1) (max s0 b0)))
+              (setq hit t)))))))
+  hit)
 
 ;;;=====================================================================
 ;;; 9. СБОР ДАННЫХ ПО БЛОКАМ (маски *ысот* *ирин* *лин*)
@@ -1165,7 +1349,7 @@
 ;; Группа объектов модели — чтобы можно было удалить одним выбором
 ;; (донор: mark:ar-make-group из MarkZ)
 (defun mk:make-group (name enames / doc groups old grp arr i n)
-  (if (and enames (> (length enames) 1))
+  (if (and enames (> (length enames) 0))
     (progn
       (setq doc    (mk:ax-get (vlax-get-acad-object) "ActiveDocument")
             groups (if doc (mk:ax-get doc "Groups") nil))
@@ -1857,6 +2041,15 @@
 
 ;; Область действия команды: своя выборка -> выборка последней МАРКАВГЕОМЕТРИЯ ->
 ;; (только если ничего нет) весь чертёж.
+;; Нормализация ключевого слова режима каркаса
+(defun mk:norm-mode (kw)
+  (cond
+    ((null kw) "Мультилинии")
+    ((= kw "M") "Мультилинии")
+    ((= kw "B") "Блоки")
+    ((= kw "A") "Все-типы")
+    (t kw)))
+
 (defun mk:scope-ss (/ ss n)
   (if (and *mk:batch* *mk:last-ss*)
     (progn
@@ -1864,7 +2057,9 @@
       (setq ss *mk:last-ss*))
     (progn
       (prompt "\nВыберите элементы витража (Enter — выборка последней МАРКАВГЕОМЕТРИЯ): ")
-      (setq ss (ssget (list (cons 0 "INSERT"))))))
+      (setq ss (if (= *mk:scope-mode* "Блоки")
+                 (ssget (list (cons 0 "INSERT")))
+                 (ssget)))))
   (cond
     (ss
      (setq *mk:last-ss* ss)
@@ -1892,21 +2087,85 @@
   nil)
 
 ;; Запись марки по группе; возвращает (записано пропущено)
-(defun mk:write-marks (elements mark-str / count skip-count e)
-  (setq count 0 skip-count 0)
+;; Правый верхний угол элемента (стойка — по оси + полсечения, ригель — конец)
+(defun mk:elem-top-right (el / p len cross type)
+  (setq p     (cdr (assoc 'INS_PT el))
+        len   (if (cdr (assoc 'LENGTH el)) (cdr (assoc 'LENGTH el)) 0.0)
+        cross (if (numberp (mk:rec-get el 'CROSS)) (mk:rec-get el 'CROSS) 0.0)
+        type  (cdr (assoc 'TYPE el)))
+  (if (null p)
+    nil
+    (if (= type "СТОЙКА")
+      (list (+ (car p) (/ cross 2.0)) (+ (cadr p) len))
+      (list (+ (car p) len) (+ (cadr p) (/ cross 2.0))))))
+
+;; Выноска марки для элемента без атрибута «Марка»
+(setq *mk:labels* nil)
+
+(defun mk:label-mark (el mark-str / pt e)
+  (setq pt (mk:elem-top-right el))
+  (if (null pt)
+    nil
+    (progn
+      (mk:ensure-layer *mk:layer-label* 2)
+      (setq e (entmakex (list '(0 . "TEXT")
+                              (cons 8 *mk:layer-label*)
+                              (cons 10 (list (+ (car pt) *mk:label-offset*)
+                                             (+ (cadr pt) *mk:label-offset*) 0.0))
+                              (cons 40 *mk:label-height*)
+                              (cons 1 mark-str)
+                              '(62 . 2))))
+      (if e (setq *mk:labels* (cons e *mk:labels*)))
+      e)))
+
+;; Собрать все выноски чертежа в группу
+(defun mk:group-labels (/ ss i lst)
+  (setq ss (ssget "_X" (list (cons 8 *mk:layer-label*) (cons 0 "TEXT"))) lst nil)
+  (if ss
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (setq lst (cons (ssname ss i) lst))
+        (setq i (1+ i)))
+      (mk:make-group *mk:group-label* (reverse lst))))
+  (if ss (sslength ss) 0))
+
+(defun mk:write-marks (elements mark-str / count skip-count lab-count e)
+  (setq count 0 skip-count 0 lab-count 0)
   (foreach el elements
     (setq e (mk:rec-get el 'ENAME))
     (if (and e (mk:has-attr? e *mk:attr-mark*))
       (progn
         (mk:set-attr e *mk:attr-mark* mark-str)
         (setq count (1+ count)))
-      (setq skip-count (1+ skip-count))))
-  (list count skip-count))
+      (progn
+        (if (mk:label-mark el mark-str)
+          (setq lab-count (1+ lab-count))
+          (setq skip-count (1+ skip-count))))))
+  (list count skip-count lab-count))
 
 ;; Сбор всех типов элементов из выборки
-(defun mk:collect-scope (ss / posts beams fills windows doors)
-  (setq posts   (mapcar 'mk:collect-post   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post*   "*"))))
-  (setq beams   (mapcar 'mk:collect-beam   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam*   "*"))))
+(defun mk:collect-scope (ss / posts beams fills windows doors res mlines)
+  (cond
+    ;; режим последнего сбора: «Все-типы» — каркас из любой геометрии + блоков
+    ((= *mk:scope-mode* "Все-типы")
+     (setq res   (mk:extract-posts-beams-all ss)
+           posts (nth 0 res)
+           beams (nth 1 res)))
+    ;; «Мультилинии» — каркас из мультилиний выборки
+    ((= *mk:scope-mode* "Мультилинии")
+     (setq mlines (mk:find-mlines-in-ss ss))
+     (if mlines
+       (progn
+         (setq res   (mk:extract-posts-beams-from-mlines mlines)
+               posts (nth 0 res)
+               beams (nth 1 res)))
+       (setq posts nil beams nil)))
+    (t
+     (setq posts (mapcar 'mk:collect-post
+                   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*"))))
+     (setq beams (mapcar 'mk:collect-beam
+                   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*"))))))
   (setq fills   (mapcar 'mk:collect-fill   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill*   "*"))))
   (setq windows (mapcar 'mk:collect-window (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*"))))
   (setq doors   (mapcar 'mk:collect-door   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door*   "*"))))
@@ -1917,7 +2176,8 @@
 ;;;---------------------------------------------------------------------
 ;;; 18f. КОМАНДЫ МАРКИРОВКИ
 ;;;---------------------------------------------------------------------
-(defun c:МАРКАВСТ (/ ss data posts elements prefix plan res count skip-count doc)
+(defun c:МАРКАВСТ (/ ss data posts elements prefix plan res count skip-count
+                     lab-count doc)
   (prompt "\n[МАРКАВСТ] Марки стоек...")
   (setq *mk:dyn-cache* nil)
   (setq prefix (mk:get-vitrage-prefix))
@@ -1934,7 +2194,7 @@
       (setq posts (mk:annotate-posts posts elements))
       (setq plan  (mk:plan-posts posts prefix))
       (prompt (strcat "\n  Марок (групп): " (itoa (length plan))))
-      (setq count 0 skip-count 0)
+      (setq count 0 skip-count 0 lab-count 0)
       (setq doc (mk:undo-begin))
       (foreach item plan
         (setq res (mk:write-marks (cadr item) (car item)))
@@ -1942,14 +2202,21 @@
                         "   [" (mk:rec-get (car (cadr item)) 'LEFT_TYPES)
                         " | " (mk:rec-get (car (cadr item)) 'RIGHT_TYPES) "]"))
         (setq count      (+ count (car res))
-              skip-count (+ skip-count (cadr res))))
+              skip-count (+ skip-count (cadr res))
+              lab-count  (+ lab-count (caddr res))))
+      (if (> lab-count 0)
+        (progn
+          (prompt (strcat "\n  Выносок (нет атрибута «" *mk:attr-mark* "»): "
+                          (itoa lab-count)))
+          (mk:group-labels)))
       (mk:undo-end doc)
       (prompt (strcat "\n[ГОТОВО] Заполнено: " (itoa count)
-                      ", Пропущено: " (itoa skip-count)))))
+                      ", выносок: " (itoa lab-count)
+                      ", пропущено: " (itoa skip-count)))))
   (princ))
 
 (defun c:МАРКАВРГ (/ ss data beams posts panels doors bounds prefix plan
-                     res count skip-count doc)
+                     res count skip-count lab-count doc)
   (prompt "\n[МАРКАВРГ] Марки ригелей...")
   (setq *mk:dyn-cache* nil)
   (setq prefix (mk:get-vitrage-prefix))
@@ -1969,16 +2236,23 @@
       (setq beams  (mk:annotate-beams beams panels doors bounds posts))
       (setq plan   (mk:plan-beams beams prefix))
       (prompt (strcat "\n  Марок (групп): " (itoa (length plan))))
-      (setq count 0 skip-count 0)
+      (setq count 0 skip-count 0 lab-count 0)
       (setq doc (mk:undo-begin))
       (foreach item plan
         (setq res (mk:write-marks (cadr item) (car item)))
         (prompt (strcat "\n  " (car item) " — шт.: " (itoa (car res))))
         (setq count      (+ count (car res))
-              skip-count (+ skip-count (cadr res))))
+              skip-count (+ skip-count (cadr res))
+              lab-count  (+ lab-count (caddr res))))
+      (if (> lab-count 0)
+        (progn
+          (prompt (strcat "\n  Выносок (нет атрибута «" *mk:attr-mark* "»): "
+                          (itoa lab-count)))
+          (mk:group-labels)))
       (mk:undo-end doc)
       (prompt (strcat "\n[ГОТОВО] Заполнено: " (itoa count)
-                      ", Пропущено: " (itoa skip-count)))))
+                      ", выносок: " (itoa lab-count)
+                      ", пропущено: " (itoa skip-count)))))
   (princ))
 
 ;;;=====================================================================
@@ -2015,26 +2289,32 @@
   (if (and *mk:batch* *mk:batch-mode*)
     (setq mode-kw *mk:batch-mode*)
     (progn
-      (initget "Блоки Мультилинии B M")
-      (setq mode-kw (getkword "\nРежим сбора каркаса [Блоки/Мультилинии] <Мультилинии>: "))))
-  (if (or (null mode-kw) (= mode-kw "Мультилинии") (= mode-kw "M"))
-    (setq use-mlines t)
-    (setq use-mlines nil))
-  (if use-mlines
-    (progn
-      (prompt "\n  Режим: МУЛЬТИЛИНИИ")
-      (if (> (length mlines) 0)
-        (progn
-          (setq mline-result (mk:extract-posts-beams-from-mlines mlines))
-          (setq posts (nth 0 mline-result))
-          (setq beams (nth 1 mline-result)))
-        (prompt "\n  [WARN] Мультилинии не найдены в выборке.")))
-    (progn
-      (prompt "\n  Режим: БЛОКИ")
-      (setq post-enames (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
-      (setq beam-enames (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*")))
-      (setq posts (mapcar 'mk:collect-post post-enames))
-      (setq beams (mapcar 'mk:collect-beam beam-enames))))
+      (initget "Блоки Мультилинии Все-типы B M A")
+      (setq mode-kw (getkword
+        "\nРежим сбора каркаса [Блоки/Мультилинии/Все-типы] <Мультилинии>: "))))
+  (setq mode-kw (mk:norm-mode mode-kw))
+  (setq *mk:scope-mode* mode-kw)
+  (setq use-mlines (= mode-kw "Мультилинии"))
+  (cond
+    ((= mode-kw "Все-типы")
+     (prompt "\n  Режим: ВСЕ ТИПЫ (мультилинии + линии/полилинии + блоки)")
+     (setq mline-result (mk:extract-posts-beams-all ss))
+     (setq posts (nth 0 mline-result))
+     (setq beams (nth 1 mline-result)))
+    (use-mlines
+     (prompt "\n  Режим: МУЛЬТИЛИНИИ")
+     (if (> (length mlines) 0)
+       (progn
+         (setq mline-result (mk:extract-posts-beams-from-mlines mlines))
+         (setq posts (nth 0 mline-result))
+         (setq beams (nth 1 mline-result)))
+       (prompt "\n  [WARN] Мультилинии не найдены в выборке.")))
+    (t
+     (prompt "\n  Режим: БЛОКИ")
+     (setq post-enames (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
+     (setq beam-enames (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*")))
+     (setq posts (mapcar 'mk:collect-post post-enames))
+     (setq beams (mapcar 'mk:collect-beam beam-enames))))
   (setq fills   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
   (setq windows (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*")))
   (setq doors   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door* "*")))
@@ -2085,7 +2365,7 @@
   (setq *mk:cached-data* (list posts beams fills windows doors bounds))
   (prompt "\n")
   (prompt "\n=== СВОДКА ПРОВЕРОК ===")
-  (prompt (strcat "\n  Режим: " (if use-mlines "МУЛЬТИЛИНИИ" "БЛОКИ")))
+  (prompt (strcat "\n  Режим: " (strcase mode-kw)))
   (prompt (strcat "\n  Дубликатов: " (itoa dup-count)))
   (prompt (strcat "\n  Перекрытий: " (itoa overlap-count)))
   (prompt (strcat "\n  Элементов вне сетки: " (itoa out-count)))
@@ -2239,9 +2519,25 @@
                     out)))
   (reverse out))
 
-(defun mk:read-mark (el / v)
-  (setq v (mk:get-attr (cdr (assoc 'ENAME el)) *mk:attr-mark*))
-  (if (and v (> (strlen v) 0)) v "—"))
+;; Карта «ename -> расчётная марка» для элементов без атрибута «Марка»
+(setq *mk:mark-map* nil)
+
+(defun mk:mark-map-put (plan)
+  (foreach item plan
+    (foreach el (cadr item)
+      (if (mk:rec-get el 'ENAME)
+        (setq *mk:mark-map*
+          (cons (cons (mk:rec-get el 'ENAME) (car item)) *mk:mark-map*)))))
+  *mk:mark-map*)
+
+(defun mk:read-mark (el / e v hit)
+  (setq e (cdr (assoc 'ENAME el))
+        v (if (and e (mk:has-attr? e *mk:attr-mark*))
+            (mk:get-attr e *mk:attr-mark*) nil))
+  (cond
+    ((and v (> (strlen v) 0)) v)
+    ((setq hit (assoc e *mk:mark-map*)) (cdr hit))
+    (t "—")))
 
 (defun mk:tab-less (a b / aa ab ma mb)
   (cond
@@ -2563,7 +2859,8 @@
       t)))
 
 ;;;--- Команда -----------------------------------------------------------
-(defun c:МАРКАВТАБЛ (/ ss data posts beams rows agg do-tbl do-xls file doc)
+(defun c:МАРКАВТАБЛ (/ ss data posts beams rows agg do-tbl do-xls file doc
+                       prefix bounds)
   (prompt "\n[МАРКАВТАБЛ] Ведомость профилей (стойки + ригели)...")
   (setq *mk:dyn-cache* nil)
   (setq ss   (mk:scope-ss))
@@ -2575,6 +2872,21 @@
     (progn
       (prompt (strcat "\n  Стоек: " (itoa (length posts))
                       ", ригелей: " (itoa (length beams))))
+      ;; расчётные марки — для элементов, у которых нет атрибута «Марка»
+      (setq *mk:mark-map* nil)
+      (setq prefix (mk:get-vitrage-prefix))
+      (setq bounds (mk:find-vitrage-bounds posts beams))
+      (if posts
+        (mk:mark-map-put
+          (mk:plan-posts
+            (mk:annotate-posts posts (append (cdr (assoc 'PANELS data)) beams))
+            prefix)))
+      (if beams
+        (mk:mark-map-put
+          (mk:plan-beams
+            (mk:annotate-beams beams (cdr (assoc 'PANELS data))
+                               (cdr (assoc 'DOORS data)) bounds posts)
+            prefix)))
       (setq rows (mk:tab-rows posts beams)
             agg  (mk:tab-aggregate rows))
       (prompt (strcat "\n  Уникальных позиций: " (itoa (length agg))))
@@ -2638,12 +2950,11 @@
     (progn
       (prompt (strcat "\n  Выбрано объектов: " (itoa (sslength ss))))
       ;; режим каркаса спрашиваем один раз на весь пакет
-      (initget "Блоки Мультилинии B M")
+      (initget "Блоки Мультилинии Все-типы B M A")
       (setq *mk:batch-mode*
-        (getkword "\nРежим сбора каркаса [Блоки/Мультилинии] <Блоки>: "))
-      (if (or (null *mk:batch-mode*) (= *mk:batch-mode* "B"))
-        (setq *mk:batch-mode* "Блоки"))
-      (if (= *mk:batch-mode* "M") (setq *mk:batch-mode* "Мультилинии"))
+        (getkword "\nРежим сбора каркаса [Блоки/Мультилинии/Все-типы] <Блоки>: "))
+      (if (null *mk:batch-mode*) (setq *mk:batch-mode* "Блоки"))
+      (setq *mk:batch-mode* (mk:norm-mode *mk:batch-mode*))
       ;; судьба сетки
       (initget "Да Нет")
       (setq keep (getkword "\nОставить сетку витража в чертеже? [Да/Нет] <Нет>: "))
@@ -2674,6 +2985,9 @@
       ;; --- 4/4 ведомость
       (prompt "\n\n===== [ЭТАП 4/4] МАРКАВТАБЛ =====")
       (c:МАРКАВТАБЛ)
+      (if (> (mk:group-labels) 0)
+        (prompt (strcat "\n  [INFO] Выноски марок собраны в группу "
+                        *mk:group-label* ".")))
       (setq *mk:batch* nil *mk:batch-ss* nil *mk:batch-mode* nil)
       (if doc (vl-catch-all-apply 'vlax-invoke-method (list doc "EndUndoMark")))
       (prompt "\n\n[ГОТОВО] Пакет МАРКАВ завершён. Откат всего пакета — один U.")))
