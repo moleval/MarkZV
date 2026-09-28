@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "1.9")
+(setq *mk:ver*            "2.0")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -141,7 +141,7 @@
 (setq *mk:suffix-threshold*     "н")
 (setq *mk:suffix-warm-cold*     "тх")
 (setq *mk:suffix-cold-warm*     "хт")
-(setq *mk:suffix-mirror*        "зерк")
+(setq *mk:mirror-suffixes*      '(".1" ".2"))  ; зеркальная пара: Ст1.1 / Ст1.2
 (setq *mk:suffix-small*         "м")     ; малый профиль
 (setq *mk:suffix-big*           "б")     ; большой профиль
 ;; Ручная таблица артикул -> "м"/"б" (приоритет над автоопределением по габариту).
@@ -168,10 +168,15 @@
 (setq *mk:join-posts-gap*       0.0)
 (setq *mk:join-beams-gap*       0.0)
 ;; Выноски марок для элементов без атрибута «Марка»
-(setq *mk:layer-label*          "Марки выноски")
-(setq *mk:group-label*          "Марки_выноски")
-(setq *mk:label-height*         100.0)
-(setq *mk:label-offset*         50.0)
+(setq *mk:layer-label*          "Обозначения")   ; слой выносок
+(setq *mk:group-label*          "Марки_выноски")  ; группа выносок
+(setq *mk:label-color*          2)                ; жёлтый
+(setq *mk:label-style*          "Основной стиль (надписи без наклона)")
+(setq *mk:label-height*         40.0)             ; высота текста
+(setq *mk:label-offset*         25.0)             ; отступ от грани профиля
+(setq *mk:label-end-gap*        100.0)            ; недоход до края профиля
+(setq *mk:label-line-gap*       1.4)              ; межстрочие (x высоту)
+(setq *mk:label-rot-post*       90.0)             ; поворот подписи стойки, град
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -794,7 +799,7 @@
   (if cur (setq out (cons (reverse cur) out)))
   (reverse out))
 
-(defun mk:track-elem (grp type / axs a0 a1 s0 s1 cross)
+(defun mk:track-elem (grp etype / axs a0 a1 s0 s1 cross)
   (setq axs   (mapcar '(lambda (x) (nth 1 x)) grp)
         a0    (apply 'min axs)
         a1    (apply 'max axs)
@@ -805,7 +810,7 @@
         (/ (+ a0 a1) 2.0)            ; ось
         s0 s1                        ; протяжённость
         (if (> cross 1.0) cross 0.0) ; габарит сечения
-        type))
+        etype))
 
 ;; Каркас из геометрии + блоков. Блоки в приоритете (у них артикул и «Марка»).
 (defun mk:extract-posts-beams-all (ss / segs vrecs hrecs cls len posts beams
@@ -865,7 +870,7 @@
         (append bbeams (reverse beams))))
 
 ;; Совпадает ли геометрический элемент с уже собранным блоком
-(defun mk:elem-covered? (ax s0 s1 blocks type / hit p bx b0 b1)
+(defun mk:elem-covered? (ax s0 s1 blocks etype / hit p bx b0 b1)
   (setq hit nil)
   (foreach b blocks
     (if (null hit)
@@ -873,7 +878,7 @@
         (setq p (cdr (assoc 'INS_PT b)))
         (if p
           (progn
-            (if (= type "СТОЙКА")
+            (if (= etype "СТОЙКА")
               (setq bx (car p)
                     b0 (cadr p)
                     b1 (+ (cadr p) (if (cdr (assoc 'LENGTH b)) (cdr (assoc 'LENGTH b)) 0.0)))
@@ -2098,9 +2103,14 @@
           base-or (mk:rec-get (car grp) 'ORIENT)
           base    (mk:filter-by grp 'ORIENT base-or)
           mirror  (mk:reject-by grp 'ORIENT base-or))
-    (setq plan (cons (list (strcat prefix " Ст" (itoa idx)) base) plan))
+    ;; есть зеркальная пара -> Ст{N}.1 и Ст{N}.2, иначе просто Ст{N}
     (if mirror
-      (setq plan (cons (list (strcat prefix " Ст" (itoa idx) *mk:suffix-mirror*) mirror) plan)))
+      (progn
+        (setq plan (cons (list (strcat prefix " Ст" (itoa idx)
+                                       (nth 0 *mk:mirror-suffixes*)) base) plan))
+        (setq plan (cons (list (strcat prefix " Ст" (itoa idx)
+                                       (nth 1 *mk:mirror-suffixes*)) mirror) plan)))
+      (setq plan (cons (list (strcat prefix " Ст" (itoa idx)) base) plan)))
     (setq idx (1+ idx)))
   (reverse plan))
 
@@ -2188,139 +2198,86 @@
   nil)
 
 ;; Запись марки по группе; возвращает (записано пропущено)
-;; Правый верхний угол элемента (запасной вариант, если образца нет)
-(defun mk:elem-top-right (el / p len cross type)
+;;;---------------------------------------------------------------------
+;;; Выноски марок и артикулов (для элементов без атрибута «Марка»)
+;;; Слой «Обозначения», жёлтый, стиль «Основной стиль (надписи без наклона)»,
+;;; высота 40, выравнивание вправо.
+;;;   ригель — у правого конца, не доходя *mk:label-end-gap* мм, над профилем
+;;;            на *mk:label-offset* мм;
+;;;   стойка — у верхнего конца, не доходя *mk:label-end-gap* мм, сбоку
+;;;            на *mk:label-offset* мм, текст повёрнут на *mk:label-rot-post*.
+;;;---------------------------------------------------------------------
+(setq *mk:labels* nil)
+(setq *mk:style-warned* nil)
+
+;; Имя текстового стиля, если он есть в чертеже
+(defun mk:label-style-name ()
+  (cond
+    ((null (mk:strp *mk:label-style*)) nil)
+    ((tblsearch "STYLE" *mk:label-style*) *mk:label-style*)
+    (t
+     (if (null *mk:style-warned*)
+       (progn
+         (setq *mk:style-warned* t)
+         (prompt (strcat "\n  [WARN] Текстовый стиль «" *mk:label-style*
+                         "» не найден — выноски текущим стилем."))))
+     nil)))
+
+;; Точка и поворот подписи: (точка поворот шаг-строки-по-X шаг-по-Y)
+(defun mk:label-anchor (el / p len cross etype x y rot dx dy step)
   (setq p     (cdr (assoc 'INS_PT el))
-        len   (if (cdr (assoc 'LENGTH el)) (cdr (assoc 'LENGTH el)) 0.0)
+        len   (if (numberp (cdr (assoc 'LENGTH el))) (cdr (assoc 'LENGTH el)) 0.0)
         cross (if (numberp (mk:rec-get el 'CROSS)) (mk:rec-get el 'CROSS) 0.0)
-        type  (cdr (assoc 'TYPE el)))
+        etype (cdr (assoc 'TYPE el))
+        step  (* *mk:label-line-gap* *mk:label-height*))
   (if (null p)
     nil
-    (if (= type "СТОЙКА")
-      (list (+ (car p) (/ cross 2.0)) (+ (cadr p) len))
-      (list (+ (car p) len) (+ (cadr p) (/ cross 2.0))))))
-
-;;;---------------------------------------------------------------------
-;;; Образцы подписей: берутся из ATTDEF динамических блоков «Стойка»/«Ригель»
-;;; (стиль, высота, поворот, выравнивание и смещение относительно вставки).
-;;;---------------------------------------------------------------------
-(setq *mk:proto-cache* nil)
-(setq *mk:labels* nil)
-
-;; Имя определения блока по маске
-(defun mk:find-block-def (mask / def out nm)
-  (setq out nil def (tblnext "BLOCK" T))
-  (while (and def (null out))
-    (setq nm (cdr (assoc 2 def)))
-    (if (and (mk:strp nm) (wcmatch (strcase nm) (strcase mask)))
-      (setq out nm))
-    (setq def (tblnext "BLOCK")))
-  out)
-
-;; Параметры ATTDEF с заданным тегом внутри определения блока
-(defun mk:attdef-proto (blkname tag / e ed out)
-  (setq out nil)
-  (if (and blkname (setq e (tblobjname "BLOCK" blkname)))
     (progn
-      (setq e (entnext e))
-      (while (and e (null out))
-        (setq ed (entget e))
-        (cond
-          ((null ed) (setq e nil))
-          ((and (= (cdr (assoc 0 ed)) "ATTDEF")
-                (mk:name= (cdr (assoc 2 ed)) tag))
-           (setq out (list
-             (cons 'PT    (cdr (assoc 10 ed)))
-             (cons 'PT2   (cdr (assoc 11 ed)))
-             (cons 'H     (if (cdr (assoc 40 ed)) (cdr (assoc 40 ed)) *mk:label-height*))
-             (cons 'STYLE (cdr (assoc 7 ed)))
-             (cons 'ROT   (if (cdr (assoc 50 ed)) (cdr (assoc 50 ed)) 0.0))
-             (cons 'J72   (if (cdr (assoc 72 ed)) (cdr (assoc 72 ed)) 0))
-             (cons 'J74   (if (cdr (assoc 74 ed)) (cdr (assoc 74 ed)) 0))
-             (cons 'WID   (if (cdr (assoc 41 ed)) (cdr (assoc 41 ed)) 1.0))
-             (cons 'COLOR (cdr (assoc 62 ed))))))
-          (t nil))
-        (if e (setq e (entnext e))))))
-  out)
+      (if (= etype "СТОЙКА")
+        (setq x   (- (car p) (/ cross 2.0) *mk:label-offset*)
+              y   (+ (cadr p) (- len *mk:label-end-gap*))
+              rot *mk:label-rot-post*
+              dx  (- step)
+              dy  0.0)
+        (setq x   (+ (car p) (- len *mk:label-end-gap*))
+              y   (+ (cadr p) (/ cross 2.0) *mk:label-offset*)
+              rot 0.0
+              dx  0.0
+              dy  step))
+      (list (list x y 0.0) rot dx dy))))
 
-;; Кэш: (тип элемента + тег) -> образец
-(defun mk:proto-for (type tag / key hit blk mask)
-  (setq key (strcat type "|" tag)
-        hit (assoc key *mk:proto-cache*))
-  (if hit
-    (cdr hit)
-    (progn
-      (setq mask (strcat "*" (if (= type "СТОЙКА") *mk:block-post* *mk:block-beam*) "*")
-            blk  (mk:find-block-def mask)
-            hit  (if blk (mk:attdef-proto blk tag) nil))
-      (setq *mk:proto-cache* (cons (cons key hit) *mk:proto-cache*))
-      hit)))
+;; Одна строка текста с выравниванием вправо
+(defun mk:label-text (pt rot str / dxf sty)
+  (setq dxf (list '(0 . "TEXT")
+                  (cons 8 *mk:layer-label*)
+                  (cons 10 pt)
+                  (cons 40 *mk:label-height*)
+                  (cons 1 str)
+                  (cons 50 (* pi (/ rot 180.0)))
+                  (cons 62 *mk:label-color*)
+                  '(72 . 2)                       ; выравнивание: вправо
+                  '(73 . 0)
+                  (cons 11 pt)))
+  (if (setq sty (mk:label-style-name))
+    (setq dxf (append dxf (list (cons 7 sty)))))
+  (entmakex dxf))
 
-;; Текст по образцу ATTDEF: смещение образца отсчитывается от точки вставки
-(defun mk:label-by-proto (proto base str / pt pt2 dxf)
-  (if (null proto)
+;; Выноска: марка, а следом артикул (если он известен)
+(defun mk:label-mark (el mark-str / anc pt rot dx dy art e n)
+  (setq anc (mk:label-anchor el)
+        art (mk:rec-get el 'ARTICLE)
+        n   0)
+  (if (null anc)
     nil
     (progn
-      (setq pt  (list (+ (car base)  (car  (cdr (assoc 'PT proto))))
-                      (+ (cadr base) (cadr (cdr (assoc 'PT proto)))) 0.0))
-      (setq pt2 (if (cdr (assoc 'PT2 proto))
-                  (list (+ (car base)  (car  (cdr (assoc 'PT2 proto))))
-                        (+ (cadr base) (cadr (cdr (assoc 'PT2 proto)))) 0.0)
-                  pt))
-      (setq dxf (list '(0 . "TEXT")
-                      (cons 8 *mk:layer-label*)
-                      (cons 10 pt)
-                      (cons 11 pt2)
-                      (cons 40 (cdr (assoc 'H proto)))
-                      (cons 41 (cdr (assoc 'WID proto)))
-                      (cons 50 (cdr (assoc 'ROT proto)))
-                      (cons 72 (cdr (assoc 'J72 proto)))
-                      (cons 74 (cdr (assoc 'J74 proto)))
-                      (cons 1 str)))
-      (if (mk:strp (cdr (assoc 'STYLE proto)))
-        (setq dxf (append dxf (list (cons 7 (cdr (assoc 'STYLE proto)))))))
-      (entmakex dxf))))
-
-;; Выноска: марка + артикул, по образцу атрибутов динамического блока
-(defun mk:label-mark (el mark-str / base type art e n pt)
-  (setq base (cdr (assoc 'INS_PT el))
-        type (cdr (assoc 'TYPE el))
-        art  (mk:rec-get el 'ARTICLE)
-        n    0)
-  (if (null base)
-    nil
-    (progn
-      (mk:ensure-layer *mk:layer-label* 2)
-      ;; марка
-      (setq e (mk:label-by-proto (mk:proto-for type *mk:attr-mark*) base mark-str))
-      (if (null e)
-        (progn                                   ; образца нет — правый верхний угол
-          (setq pt (mk:elem-top-right el))
-          (if pt
-            (setq e (entmakex (list '(0 . "TEXT")
-                                    (cons 8 *mk:layer-label*)
-                                    (cons 10 (list (+ (car pt) *mk:label-offset*)
-                                                   (+ (cadr pt) *mk:label-offset*) 0.0))
-                                    (cons 40 *mk:label-height*)
-                                    (cons 1 mark-str)
-                                    '(62 . 2)))))))
-      (if e (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n))))
-      ;; артикул
-      (if (and art (> (strlen art) 0))
-        (progn
-          (setq e (mk:label-by-proto (mk:proto-for type *mk:attr-article*) base art))
-          (if (null e)
-            (progn
-              (setq pt (mk:elem-top-right el))
-              (if pt
-                (setq e (entmakex (list '(0 . "TEXT")
-                                        (cons 8 *mk:layer-label*)
-                                        (cons 10 (list (+ (car pt) *mk:label-offset*)
-                                                       (- (cadr pt) (* 1.4 *mk:label-height*)) 0.0))
-                                        (cons 40 *mk:label-height*)
-                                        (cons 1 art)
-                                        '(62 . 2)))))))
-          (if e (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n))))))
+      (mk:ensure-layer *mk:layer-label* *mk:label-color*)
+      (setq pt (nth 0 anc) rot (nth 1 anc) dx (nth 2 anc) dy (nth 3 anc))
+      (if (setq e (mk:label-text pt rot mark-str))
+        (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n))))
+      (if (and (mk:strp art) (> (strlen art) 0))
+        (if (setq e (mk:label-text (list (+ (car pt) dx) (+ (cadr pt) dy) 0.0)
+                                   rot art))
+          (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n)))))
       (> n 0))))
 
 ;; Собрать все выноски чертежа в группу
