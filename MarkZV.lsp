@@ -84,8 +84,8 @@
 ;;;=====================================================================
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
-(setq *mk:rev*            "r2")
-(setq *mk:build*          "2026-09-28.b2")
+;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
+(setq *mk:ver*            "1.1")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -117,7 +117,10 @@
 (setq *mk:vitrage-radius* 10000.0)
 (setq *mk:slope-tol*      0.0033)
 (setq *mk:out-file*       "D:/MARKZV_MODEL.txt")
+(setq *mk:diag-file*      "D:/MARKZV_DIAG.txt")
 (setq *mk:cached-data*    nil)
+(setq *mk:last-ss*        nil)   ; выборка последнего МАРКАСБОР
+(setq *mk:dyn-cache*      nil)   ; кэш динамических свойств: ename -> alist
 
 (setq *mk:suffix-window-one*    "ок")
 (setq *mk:suffix-window-both*   "окх2")
@@ -235,71 +238,104 @@
   found)
 
 ;;;=====================================================================
-;;; 4. ИЗВЛЕЧЕНИЕ ДИНАМИЧЕСКИХ СВОЙСТВ (по маске + Variant)
+;;; 4. ДИНАМИЧЕСКИЕ СВОЙСТВА И ГАБАРИТЫ
 ;;;=====================================================================
-(defun mk:get-dyn (obj prop-mask / props val p raw-val prop-name)
-  (setq val nil)
-  (if (and obj
-           (vlax-property-available-p obj 'IsDynamicBlock)
-           (= (vlax-get obj 'IsDynamicBlock) :vlax-true))
+(defun mk:dynamic? (obj / v)
+  (setq v (mk:ax-get obj "IsDynamicBlock"))
+  (and v (= v :vlax-true)))
+
+;; Все пары (имя . значение) динамического блока; VARIANT развёрнут
+(defun mk:dyn-pairs-raw (obj / props out p nm val)
+  (setq out nil)
+  (if (mk:dynamic? obj)
     (progn
       (setq props (vl-catch-all-apply 'vlax-invoke-method
                     (list obj "GetDynamicBlockProperties")))
       (if (not (vl-catch-all-error-p props))
         (progn
           (if (= (type props) 'VARIANT)
-            (setq props (vlax-safearray->list (vlax-variant-value props))))
-          (if (and props (listp props))
+            (setq props (vl-catch-all-apply 'vlax-safearray->list
+                          (list (vlax-variant-value props)))))
+          (if (and props (listp props) (not (vl-catch-all-error-p props)))
             (foreach p props
-              (if (null val)
+              (setq nm  (mk:ax-get p "PropertyName")
+                    val (mk:ax-get p "Value"))
+              (if (= (type val) 'VARIANT)
                 (progn
-                  (setq prop-name (vlax-get p 'PropertyName))
-                  (if (and prop-name (mk:strp prop-name)
-                           (wcmatch (strcase prop-name) (strcase prop-mask)))
-                    (progn
-                      (setq raw-val (vl-catch-all-apply 'vlax-get (list p 'Value)))
-                      (if (and raw-val (not (vl-catch-all-error-p raw-val)))
-                        (cond
-                          ((numberp raw-val)
-                           (setq val (float raw-val)))
-                          ((= (type raw-val) 'VARIANT)
-                           (setq raw-val (vl-catch-all-apply 'vlax-variant-value (list raw-val)))
-                           (if (numberp raw-val) (setq val (float raw-val))))
-                          ((and (mk:strp raw-val) (distof raw-val 2))
-                           (setq val (distof raw-val 2)))))))))))))))
+                  (setq val (vl-catch-all-apply 'vlax-variant-value (list val)))
+                  (if (vl-catch-all-error-p val) (setq val nil))))
+              (if (mk:strp nm)
+                (setq out (cons (cons (mk:trim nm) val) out)))))))))
+  (reverse out))
+
+;; То же, но с кэшем по ename (сбор на большом фасаде идёт в разы быстрее)
+(defun mk:dyn-pairs (obj / e hit pairs)
+  (setq e (vl-catch-all-apply 'vlax-vla-object->ename (list obj)))
+  (if (vl-catch-all-error-p e) (setq e nil))
+  (setq hit (if e (assoc e *mk:dyn-cache*) nil))
+  (if hit
+    (cdr hit)
+    (progn
+      (setq pairs (mk:dyn-pairs-raw obj))
+      (if e (setq *mk:dyn-cache* (cons (cons e pairs) *mk:dyn-cache*)))
+      pairs)))
+
+;; Числовое динамическое свойство по маске имени (*лин*, *ысот*, *ирин*)
+(defun mk:get-dyn (obj prop-mask / val)
+  (setq val nil)
+  (foreach pr (mk:dyn-pairs obj)
+    (if (and (null val)
+             (wcmatch (strcase (car pr)) (strcase prop-mask)))
+      (setq val (mk:numval (cdr pr)))))
   (if (numberp val) val nil))
 
 ;;;=====================================================================
-;;; 5. ИЗВЛЕЧЕНИЕ ВИДИМОСТИ (с Variant)
+;;; 5. ВИДИМОСТЬ
 ;;;=====================================================================
-(defun mk:get-vis (obj / props val raw-val prop-name)
+(defun mk:get-vis (obj / val)
   (setq val nil)
-  (if (and obj
-           (vlax-property-available-p obj 'IsDynamicBlock)
-           (= (vlax-get obj 'IsDynamicBlock) :vlax-true))
-    (progn
-      (setq props (vl-catch-all-apply 'vlax-invoke-method
-                    (list obj "GetDynamicBlockProperties")))
-      (if (not (vl-catch-all-error-p props))
-        (progn
-          (if (= (type props) 'VARIANT)
-            (setq props (vlax-safearray->list (vlax-variant-value props))))
-          (if (and props (listp props))
-            (foreach p props
-              (if (null val)
-                (progn
-                  (setq prop-name (vlax-get p 'PropertyName))
-                  (if (and prop-name (mk:strp prop-name)
-                           (member (mk:trim prop-name) *mk:vis-candidates*))
-                    (progn
-                      (setq raw-val (vl-catch-all-apply 'vlax-get (list p 'Value)))
-                      (if (and raw-val (not (vl-catch-all-error-p raw-val)))
-                        (progn
-                          (if (= (type raw-val) 'VARIANT)
-                            (setq raw-val (vlax-variant-value raw-val)))
-                          (if (mk:strp raw-val)
-                            (setq val (mk:trim raw-val)))))))))))))))
+  (foreach pr (mk:dyn-pairs obj)
+    (if (and (null val)
+             (member (car pr) *mk:vis-candidates*)
+             (mk:strp (cdr pr)))
+      (setq val (mk:trim (cdr pr)))))
   val)
+
+;;;=====================================================================
+;;; 5a. ГАБАРИТ БЛОКА (фолбэк размеров, донор: mark:fill-e-bb из MarkZ)
+;;;=====================================================================
+(defun mk:e-bb (obj / r a b)
+  (if (null obj)
+    nil
+    (progn
+      (setq a nil b nil)
+      (setq r (vl-catch-all-apply 'vlax-invoke-method
+                (list obj "GetBoundingBox" 'a 'b)))
+      (if (or (vl-catch-all-error-p r) (null a) (null b))
+        nil
+        (progn
+          (setq a (vl-catch-all-apply 'vlax-safearray->list (list a))
+                b (vl-catch-all-apply 'vlax-safearray->list (list b)))
+          (if (or (vl-catch-all-error-p a) (vl-catch-all-error-p b)
+                  (null a) (null b))
+            nil
+            (list (float (car a)) (float (cadr a))
+                  (float (car b)) (float (cadr b)))))))))
+
+(defun mk:bb-w (bb) (if bb (abs (- (nth 2 bb) (nth 0 bb))) nil))
+(defun mk:bb-h (bb) (if bb (abs (- (nth 3 bb) (nth 1 bb))) nil))
+
+;; Размер: сначала динамическое свойство, иначе габарит -> (значение источник)
+(defun mk:dim-src (obj mask bb-fn / v bb)
+  (setq v (mk:get-dyn obj mask))
+  (if (numberp v)
+    (list v "DYN")
+    (progn
+      (setq bb (mk:e-bb obj)
+            v  (if bb (apply bb-fn (list bb)) nil))
+      (if (and (numberp v) (> v 1e-6))
+        (list v "BBOX")
+        (list nil "НЕТ")))))
 
 ;;;=====================================================================
 ;;; 6. ИЗВЛЕЧЕНИЕ ГЕОМЕТРИИ
@@ -476,10 +512,12 @@
 ;;;=====================================================================
 ;;; 9. СБОР ДАННЫХ ПО БЛОКАМ (маски *ысот* *ирин* *лин*)
 ;;;=====================================================================
-(defun mk:collect-fill (ename / obj geom)
+(defun mk:collect-fill (ename / obj geom dh dw)
   (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
   (if (or (vl-catch-all-error-p obj) (null obj)) (setq obj nil))
-  (setq geom (mk:get-geom obj))
+  (setq geom (mk:get-geom obj)
+        dh   (mk:dim-src obj *mk:mask-height* 'mk:bb-h)
+        dw   (mk:dim-src obj *mk:mask-width*  'mk:bb-w))
   (list
     (cons 'TYPE       "ЗАПОЛНЕНИЕ")
     (cons 'ENAME      ename)
@@ -487,18 +525,21 @@
     (cons 'ROTATION   (cdr (assoc 'ROTATION geom)))
     (cons 'XSCALE     (cdr (assoc 'XSCALE geom)))
     (cons 'YSCALE     (cdr (assoc 'YSCALE geom)))
-    (cons 'HEIGHT     (mk:get-dyn obj *mk:mask-height*))
-    (cons 'WIDTH      (mk:get-dyn obj *mk:mask-width*))
+    (cons 'HEIGHT     (car dh))
+    (cons 'WIDTH      (car dw))
+    (cons 'SIZE_SRC   (strcat (cadr dh) "/" (cadr dw)))
     (cons 'THICKNESS  (mk:get-attr ename *mk:attr-thickness*))
     (cons 'PROFILE    (mk:get-attr ename *mk:attr-profile*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'CONN_POSTS nil)
   ))
 
-(defun mk:collect-window (ename / obj geom)
+(defun mk:collect-window (ename / obj geom dh dw)
   (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
   (if (or (vl-catch-all-error-p obj) (null obj)) (setq obj nil))
-  (setq geom (mk:get-geom obj))
+  (setq geom (mk:get-geom obj)
+        dh   (mk:dim-src obj *mk:mask-height* 'mk:bb-h)
+        dw   (mk:dim-src obj *mk:mask-width*  'mk:bb-w))
   (list
     (cons 'TYPE       "ОКНО")
     (cons 'ENAME      ename)
@@ -506,17 +547,20 @@
     (cons 'ROTATION   (cdr (assoc 'ROTATION geom)))
     (cons 'XSCALE     (cdr (assoc 'XSCALE geom)))
     (cons 'YSCALE     (cdr (assoc 'YSCALE geom)))
-    (cons 'HEIGHT     (mk:get-dyn obj *mk:mask-height*))
-    (cons 'WIDTH      (mk:get-dyn obj *mk:mask-width*))
+    (cons 'HEIGHT     (car dh))
+    (cons 'WIDTH      (car dw))
+    (cons 'SIZE_SRC   (strcat (cadr dh) "/" (cadr dw)))
     (cons 'NAME       (mk:get-attr ename *mk:attr-name*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'CONN_POSTS nil)
   ))
 
-(defun mk:collect-door (ename / obj geom)
+(defun mk:collect-door (ename / obj geom dh dw)
   (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
   (if (or (vl-catch-all-error-p obj) (null obj)) (setq obj nil))
-  (setq geom (mk:get-geom obj))
+  (setq geom (mk:get-geom obj)
+        dh   (mk:dim-src obj *mk:mask-height* 'mk:bb-h)
+        dw   (mk:dim-src obj *mk:mask-width*  'mk:bb-w))
   (list
     (cons 'TYPE       "ДВЕРЬ")
     (cons 'ENAME      ename)
@@ -524,24 +568,27 @@
     (cons 'ROTATION   (cdr (assoc 'ROTATION geom)))
     (cons 'XSCALE     (cdr (assoc 'XSCALE geom)))
     (cons 'YSCALE     (cdr (assoc 'YSCALE geom)))
-    (cons 'HEIGHT     (mk:get-dyn obj *mk:mask-height*))
-    (cons 'WIDTH      (mk:get-dyn obj *mk:mask-width*))
+    (cons 'HEIGHT     (car dh))
+    (cons 'WIDTH      (car dw))
+    (cons 'SIZE_SRC   (strcat (cadr dh) "/" (cadr dw)))
     (cons 'NAME       (mk:get-attr ename *mk:attr-name*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'CONN_POSTS nil)
   ))
 
-(defun mk:collect-post (ename / obj geom)
+(defun mk:collect-post (ename / obj geom dl)
   (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
   (if (or (vl-catch-all-error-p obj) (null obj)) (setq obj nil))
-  (setq geom (mk:get-geom obj))
+  (setq geom (mk:get-geom obj)
+        dl   (mk:dim-src obj *mk:mask-length* 'mk:bb-h))
   (list
     (cons 'TYPE       "СТОЙКА")
     (cons 'ENAME      ename)
     (cons 'INS_PT     (cdr (assoc 'INS_PT geom)))
     (cons 'ROTATION   (cdr (assoc 'ROTATION geom)))
     (cons 'XSCALE     (cdr (assoc 'XSCALE geom)))
-    (cons 'LENGTH     (mk:get-dyn obj *mk:mask-length*))
+    (cons 'LENGTH     (car dl))
+    (cons 'SIZE_SRC   (cadr dl))
     (cons 'PROFILE    (mk:get-attr ename *mk:attr-profile*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'LEFT_CONN  nil)
@@ -549,16 +596,18 @@
     (cons 'PROTRUDING nil)
   ))
 
-(defun mk:collect-beam (ename / obj geom)
+(defun mk:collect-beam (ename / obj geom dl)
   (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
   (if (or (vl-catch-all-error-p obj) (null obj)) (setq obj nil))
-  (setq geom (mk:get-geom obj))
+  (setq geom (mk:get-geom obj)
+        dl   (mk:dim-src obj *mk:mask-length* 'mk:bb-w))
   (list
     (cons 'TYPE       "РИГЕЛЬ")
     (cons 'ENAME      ename)
     (cons 'INS_PT     (cdr (assoc 'INS_PT geom)))
     (cons 'ROTATION   (cdr (assoc 'ROTATION geom)))
-    (cons 'LENGTH     (mk:get-dyn obj *mk:mask-length*))
+    (cons 'LENGTH     (car dl))
+    (cons 'SIZE_SRC   (cadr dl))
     (cons 'PROFILE    (mk:get-attr ename *mk:attr-profile*))
     (cons 'VISIBILITY (mk:get-vis obj))
     (cons 'TOP_ELEM   nil)
@@ -750,32 +799,33 @@
       (setq new-posts (cons post new-posts))))
   (list (reverse new-posts) protruding-count))
 
-;; Валидация ригеля — проверка ОБА конца
-(defun mk:validate-beam (beam posts beams / has-connection bx by bx2 px py ox oy beam-len)
+;; Валидация ригеля — проверка ОБОИХ концов.
+;; Ригель вставляется с отступом от оси стойки (ширина профиля), поэтому
+;; допуск по X = *mk:offset-fill* + *mk:tol-adjacency*, а не голый допуск 5 мм.
+(defun mk:post-span (post / py plen)
+  (setq py   (cadr (cdr (assoc 'INS_PT post)))
+        plen (if (cdr (assoc 'LENGTH post)) (cdr (assoc 'LENGTH post)) 0.0))
+  (list (- py *mk:tol-adjacency*) (+ py plen *mk:tol-adjacency*)))
+
+(defun mk:beam-touches-post? (bx by post / px span tol)
+  (setq tol  (+ *mk:offset-fill* *mk:tol-adjacency*)
+        px   (car (cdr (assoc 'INS_PT post)))
+        span (mk:post-span post))
+  (and (<= (abs (- bx px)) tol)
+       (>= by (car span))
+       (<= by (cadr span))))
+
+(defun mk:validate-beam (beam posts beams / has-connection bx by bx2 ox oy beam-len)
   (setq has-connection nil)
   (setq beam-len (if (cdr (assoc 'LENGTH beam)) (cdr (assoc 'LENGTH beam)) 0.0))
-  (setq bx (car (cdr (assoc 'INS_PT beam)))
-        by (cadr (cdr (assoc 'INS_PT beam)))
+  (setq bx  (car (cdr (assoc 'INS_PT beam)))
+        by  (cadr (cdr (assoc 'INS_PT beam)))
         bx2 (+ bx beam-len))
   (foreach post posts
     (if (and (cdr (assoc 'INS_PT post)) (not has-connection))
-      (progn
-        (setq px (car (cdr (assoc 'INS_PT post)))
-              py (cadr (cdr (assoc 'INS_PT post))))
-        (if (and (< (abs (- bx px)) *mk:tol-adjacency*)
-                 (>= by py)
-                 (<= by (+ py (if (cdr (assoc 'LENGTH post)) (cdr (assoc 'LENGTH post)) 0.0))))
-          (setq has-connection t)))))
-  (if (not has-connection)
-    (foreach post posts
-      (if (and (cdr (assoc 'INS_PT post)) (not has-connection))
-        (progn
-          (setq px (car (cdr (assoc 'INS_PT post)))
-                py (cadr (cdr (assoc 'INS_PT post))))
-          (if (and (< (abs (- bx2 px)) *mk:tol-adjacency*)
-                   (>= by py)
-                   (<= by (+ py (if (cdr (assoc 'LENGTH post)) (cdr (assoc 'LENGTH post)) 0.0))))
-            (setq has-connection t))))))
+      (if (or (mk:beam-touches-post? bx  by post)
+              (mk:beam-touches-post? bx2 by post))
+        (setq has-connection t))))
   (if (not has-connection)
     (foreach other-beam beams
       (if (and (not (eq beam other-beam))
@@ -1157,7 +1207,8 @@
       (write-line "--- СТОЙКИ ---" f)
       (foreach post posts
         (write-line (strcat "  INS_PT: " (vl-prin1-to-string (cdr (assoc 'INS_PT post)))) f)
-        (write-line (strcat "  LENGTH: " (vl-prin1-to-string (cdr (assoc 'LENGTH post)))) f)
+        (write-line (strcat "  LENGTH: " (vl-prin1-to-string (cdr (assoc 'LENGTH post)))
+                            "  (источник: " (if (cdr (assoc 'SIZE_SRC post)) (cdr (assoc 'SIZE_SRC post)) "НЕТ") ")") f)
         (write-line (strcat "  PROFILE: " (if (cdr (assoc 'PROFILE post)) (cdr (assoc 'PROFILE post)) "НЕТ")) f)
         (write-line (strcat "  PROTRUDING: " (if (cdr (assoc 'PROTRUDING post)) "ДА" "НЕТ")) f)
         (write-line (strcat "  LEFT_CONN: " (itoa (length (cdr (assoc 'LEFT_CONN post))))) f)
@@ -1166,7 +1217,8 @@
       (write-line "--- РИГЕЛИ ---" f)
       (foreach beam beams
         (write-line (strcat "  INS_PT: " (vl-prin1-to-string (cdr (assoc 'INS_PT beam)))) f)
-        (write-line (strcat "  LENGTH: " (vl-prin1-to-string (cdr (assoc 'LENGTH beam)))) f)
+        (write-line (strcat "  LENGTH: " (vl-prin1-to-string (cdr (assoc 'LENGTH beam)))
+                            "  (источник: " (if (cdr (assoc 'SIZE_SRC beam)) (cdr (assoc 'SIZE_SRC beam)) "НЕТ") ")") f)
         (write-line (strcat "  PROFILE: " (if (cdr (assoc 'PROFILE beam)) (cdr (assoc 'PROFILE beam)) "НЕТ")) f)
         (write-line (strcat "  TOP_ELEM: " (if (cdr (assoc 'TOP_ELEM beam)) "Есть" "Нет")) f)
         (write-line (strcat "  BOT_ELEM: " (if (cdr (assoc 'BOT_ELEM beam)) "Есть" "Нет")) f)
@@ -1295,6 +1347,27 @@
 (defun mk:ss-all-inserts ()
   (ssget "_X" (list (cons 0 "INSERT"))))
 
+;; Область действия команды: своя выборка -> выборка последнего МАРКАСБОР ->
+;; (только если ничего нет) весь чертёж. Раньше всегда брался весь чертёж,
+;; из-за чего марки получали блоки за пределами выделения.
+(defun mk:scope-ss (/ ss n)
+  (prompt "\nВыберите элементы витража (Enter — выборка последнего МАРКАСБОР): ")
+  (setq ss (ssget (list (cons 0 "INSERT"))))
+  (cond
+    (ss
+     (setq *mk:last-ss* ss)
+     (prompt (strcat "\n  Область: выборка, объектов " (itoa (sslength ss))))
+     ss)
+    (t
+     (setq n (vl-catch-all-apply 'sslength (list *mk:last-ss*)))
+     (if (and *mk:last-ss* (not (vl-catch-all-error-p n)) (> n 0))
+       (progn
+         (prompt (strcat "\n  Область: выборка последнего МАРКАСБОР, объектов " (itoa n)))
+         *mk:last-ss*)
+       (progn
+         (prompt "\n  [WARN] Выборки нет — обрабатывается ВЕСЬ чертёж.")
+         (mk:ss-all-inserts))))))
+
 (defun mk:undo-begin (/ doc)
   (setq doc (mk:ax-get (vlax-get-acad-object) "ActiveDocument"))
   (if doc (vl-catch-all-apply 'vlax-invoke-method (list doc "StartUndoMark")))
@@ -1321,7 +1394,8 @@
   (prompt "\n[МАРКАЗАПОЛН-СТ] Автозаполнение атрибутов стоек...")
   (setq prefix (mk:get-vitrage-prefix))
   (prompt (strcat "\n  Префикс витража: " prefix))
-  (setq ss    (mk:ss-all-inserts))
+  (setq *mk:dyn-cache* nil)
+  (setq ss    (mk:scope-ss))
   (setq posts (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
   (if (null posts)
     (prompt "\n  [INFO] Блоки стоек не найдены.")
@@ -1350,7 +1424,8 @@
   (prompt "\n[МАРКАЗАПОЛН-РГ] Автозаполнение атрибутов ригелей...")
   (setq prefix (mk:get-vitrage-prefix))
   (prompt (strcat "\n  Префикс витража: " prefix))
-  (setq ss      (mk:ss-all-inserts))
+  (setq *mk:dyn-cache* nil)
+  (setq ss      (mk:scope-ss))
   (setq posts   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-post* "*")))
   (setq beams   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*")))
   (setq fills   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
@@ -1405,7 +1480,9 @@
                       mline-result use-mlines mode-kw post-enames beam-enames)
   (prompt "\n[МАРКАСБОР] Сбор данных и построение 2D модели витража...")
   (prompt "\nВыберите элементы витража (рамкой): ")
+  (setq *mk:dyn-cache* nil)
   (setq ss (ssget))
+  (if ss (setq *mk:last-ss* ss))
   (if (null ss)
     (prompt "\n[INFO] Ничего не выбрано."))
   (if ss (progn
@@ -1519,13 +1596,85 @@
   (princ))
 
 ;;;=====================================================================
+;;; 20a. ДИАГНОСТИКА БЛОКА (почему LENGTH/WIDTH/PROFILE = nil)
+;;;=====================================================================
+(defun mk:fmt (v) (vl-princ-to-string v))
+
+(defun mk:diag-block (ename / obj lines bb attrs pairs nm hit)
+  (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
+  (if (vl-catch-all-error-p obj) (setq obj nil))
+  (setq lines nil)
+  (setq lines (cons (strcat "DXF 0        : " (mk:fmt (cdr (assoc 0 (entget ename))))) lines))
+  (setq lines (cons (strcat "DXF 2 (имя)  : " (mk:fmt (cdr (assoc 2 (entget ename))))) lines))
+  (setq lines (cons (strcat "Name         : " (mk:fmt (mk:ax-get obj "Name"))) lines))
+  (setq lines (cons (strcat "EffectiveName: " (mk:fmt (mk:ax-get obj "EffectiveName"))) lines))
+  (setq lines (cons (strcat "Слой         : " (mk:fmt (cdr (assoc 8 (entget ename))))) lines))
+  (setq lines (cons (strcat "Динамический : " (if (mk:dynamic? obj) "ДА" "НЕТ")) lines))
+  (setq lines (cons (strcat "InsertionPoint: " (mk:fmt (cdr (assoc 'INS_PT (mk:get-geom obj))))) lines))
+  (setq lines (cons (strcat "Rotation     : " (mk:fmt (cdr (assoc 'ROTATION (mk:get-geom obj))))) lines))
+  (setq lines (cons (strcat "XScale/YScale: "
+                            (mk:fmt (cdr (assoc 'XSCALE (mk:get-geom obj)))) " / "
+                            (mk:fmt (cdr (assoc 'YSCALE (mk:get-geom obj))))) lines))
+  (setq bb (mk:e-bb obj))
+  (setq lines (cons (strcat "Габарит BBOX : "
+                            (if bb (strcat "Ш=" (rtos (mk:bb-w bb) 2 1)
+                                           "  В=" (rtos (mk:bb-h bb) 2 1))
+                              "не получен")) lines))
+  (setq lines (cons "--- АТРИБУТЫ (тег = значение) ---" lines))
+  (setq attrs (mk:get-all-attrs ename))
+  (if attrs
+    (foreach a attrs
+      (setq lines (cons (strcat "   <" (mk:fmt (car a)) "> = \"" (mk:fmt (cdr a)) "\"") lines)))
+    (setq lines (cons "   [нет атрибутов]" lines)))
+  (setq lines (cons "--- ДИНАМИЧЕСКИЕ СВОЙСТВА (имя = значение) ---" lines))
+  (setq pairs (mk:dyn-pairs-raw obj))
+  (if pairs
+    (foreach pr pairs
+      (setq lines (cons (strcat "   <" (car pr) "> = " (mk:fmt (cdr pr))) lines)))
+    (setq lines (cons "   [нет динамических свойств]" lines)))
+  (setq lines (cons "--- ЧТО НАХОДЯТ ТЕКУЩИЕ МАСКИ ---" lines))
+  (setq lines (cons (strcat "   " *mk:mask-length* " -> " (mk:fmt (mk:get-dyn obj *mk:mask-length*))) lines))
+  (setq lines (cons (strcat "   " *mk:mask-height* " -> " (mk:fmt (mk:get-dyn obj *mk:mask-height*))) lines))
+  (setq lines (cons (strcat "   " *mk:mask-width*  " -> " (mk:fmt (mk:get-dyn obj *mk:mask-width*)))  lines))
+  (setq lines (cons (strcat "   Видимость -> " (mk:fmt (mk:get-vis obj))) lines))
+  (setq lines (cons (strcat "   Атрибут «" *mk:attr-profile* "» -> "
+                            (mk:fmt (mk:get-attr ename *mk:attr-profile*))) lines))
+  (setq lines (cons (strcat "   Атрибут «" *mk:attr-mark* "» -> "
+                            (if (mk:has-attr? ename *mk:attr-mark*) "ЕСТЬ" "НЕТ")) lines))
+  (reverse lines))
+
+(defun c:МАРКАДИАГ (/ sel ename lines f)
+  (prompt "\n[МАРКАДИАГ] Диагностика блока.")
+  (setq sel (entsel "\nУкажите блок (стойку, ригель, заполнение, окно, дверь): "))
+  (if (null sel)
+    (prompt "\n  [INFO] Блок не указан.")
+    (progn
+      (setq ename (car sel))
+      (setq *mk:dyn-cache* nil)
+      (setq lines (mk:diag-block ename))
+      (prompt "\n---------------------------------------------")
+      (foreach l lines (prompt (strcat "\n" l)))
+      (prompt "\n---------------------------------------------")
+      (setq f (open *mk:diag-file* "a"))
+      (if f
+        (progn
+          (write-line "=== МАРКАДИАГ ===" f)
+          (foreach l lines (write-line l f))
+          (write-line "" f)
+          (close f)
+          (prompt (strcat "\n[OK] Дописано в: " *mk:diag-file*)))
+        (prompt "\n[WARN] Файл диагностики не создан."))))
+  (princ))
+
+;;;=====================================================================
 ;;; 21. ИНИЦИАЛИЗАЦИЯ С АВТОПРОВЕРКОЙ
 ;;;=====================================================================
-(prompt (strcat "\n[MarkZV] Загружен " *mk:rev* " build " *mk:build* "."))
+(prompt (strcat "\n[MarkZV] Ред. " *mk:ver* " загружена."))
 (prompt "\n  Команды:")
 (prompt "\n    МАРКАСБОР       - Сбор данных и построение 2D модели")
 (prompt "\n    МАРКАМОДЕЛЬ     - Тестовая отрисовка модели")
 (prompt "\n    МАРКАЗАПОЛН-СТ  - Автозаполнение атрибутов стоек")
 (prompt "\n    МАРКАЗАПОЛН-РГ  - Автозаполнение атрибутов ригелей")
+(prompt "\n    МАРКАДИАГ       - Диагностика блока (свойства, атрибуты, габарит)")
 (prompt "\n    MK_CHECK        - Проверка баланса скобок файла")
 (princ)

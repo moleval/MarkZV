@@ -60,6 +60,8 @@
 
 **Этап 0.5 (сделано).** Исправлены дефекты B2, B3, B4, B5, B10 (отмечены ✅ в §3); рабочий файл переведён в CP1251 + CRLF, как в поставке MARKZ.lsp. Архитектурно MarkZV остаётся **самодостаточным файлом**: код MarkZ используется как справочник-донор, общий `MKCORE.lsp` не заводим (решение от 2026-09-28).
 
+**Ред. 1.1 (сделано).** Портирован донор `mark:fill-e-bb` → `mk:e-bb` (габарит блока как фолбэк размеров) и идея кэша `mark:dyn-pairs` → `mk:dyn-pairs`. Добавлена своя диагностика `МАРКАДИАГ` по мотивам `mark:debug-one-fill` / `mark:debug-enum-dyn`.
+
 **Этап 1 — общий слой `MKCORE.lsp` (низкий риск, максимальная отдача).**
 Портировать из MARKZ.lsp без изменения логики: `ax-get`/`ax-put`/`ax-invoke`, `unwrap`, `strp`/`trim`/`name=`, `block-names`/`name-match?`/`blk-match?`, `find-attr*`, `load-dyn-pairs`/`dyn-pairs`/`get-dyn`/`get-visibility`, `same-num?`, `scan-parens`/`find-source`, `out`/`print-limited`/`safe`.
 MarkZV подключает: `(if (null mk:core-loaded) (load "MKCORE.lsp"))`, старые `mk:*` остаются тонкими обёртками — команды не ломаются.
