@@ -49,4 +49,5 @@ python3 tools/check_parens.py MarkZV.lsp   # аналог TEST 00 / MK_CHECK б�
 
 ## Документы
 
+- [INSTALL.md](INSTALL.md) — клонирование репозитория, установка в AutoCAD, чек-лист тестового прогона.
 - [REUSE_MARKZ.md](REUSE_MARKZ.md) — карта пересечений с MarkZ, план переиспользования, список найденных дефектов.
