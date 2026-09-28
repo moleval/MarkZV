@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.2")
+(setq *mk:ver*            "2.3")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -180,6 +180,12 @@
 (setq *mk:cross-fallback*       50.0)             ; габарит сечения, если неизвестен
 ;; Типы объектов, считающихся профилем (полилинии и линии игнорируются).
 (setq *mk:seg-types*            '("MLINE"))
+;;; Т-соединения
+(setq *mk:tol-tjoint*           30.0)   ; допуск примыкания торца к ригелю
+(setq *mk:tol-tcenter*          30.0)   ; допуск «Т строго по центру ригеля»
+(setq *mk:suffix-tjoint-lo*     ".1")   ; ригель под вертикальным элементом
+(setq *mk:suffix-tjoint-hi*     ".2")   ; ригель над вертикальным элементом
+(setq *mk:suffix-vert-beam*     "т")    ; вертикальный элемент с двумя Т
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -1731,6 +1737,10 @@
         (write-line (strcat "  АРТИКУЛ: " (if (cdr (assoc 'ARTICLE beam)) (cdr (assoc 'ARTICLE beam)) "НЕТ")) f)
         (write-line (strcat "  TOP_ELEM: " (if (cdr (assoc 'TOP_ELEM beam)) "Есть" "Нет")) f)
         (write-line (strcat "  BOT_ELEM: " (if (cdr (assoc 'BOT_ELEM beam)) "Есть" "Нет")) f)
+        (write-line (strcat "  Т-СОЕДИНЕНИЕ: "
+                            (if (mk:rec-get beam 'TJOINT) (mk:rec-get beam 'TJOINT) "нет")
+                            "   ВЕРТИКАЛЬНЫЙ: "
+                            (if (mk:rec-get beam 'VERT) "да" "нет")) f)
         (write-line (strcat "  СУФФИКС: " (if (and (cdr (assoc 'SUFFIX beam))
                                                    (> (strlen (cdr (assoc 'SUFFIX beam))) 0))
                                             (cdr (assoc 'SUFFIX beam)) "нет")) f)
@@ -1888,16 +1898,20 @@
 
 (defun mk:el-xrange (el / x w)
   (setq x (car (cdr (assoc 'INS_PT el))))
-  (if (= (cdr (assoc 'TYPE el)) "РИГЕЛЬ")
-    (setq w (if (cdr (assoc 'LENGTH el)) (cdr (assoc 'LENGTH el)) 0.0))
-    (setq w (if (cdr (assoc 'WIDTH el))  (cdr (assoc 'WIDTH el))  0.0)))
+  (cond
+    ((mk:rec-get el 'VERT) (setq w 0.0))            ; вертикальный ригель (импост)
+    ((= (cdr (assoc 'TYPE el)) "РИГЕЛЬ")
+     (setq w (if (cdr (assoc 'LENGTH el)) (cdr (assoc 'LENGTH el)) 0.0)))
+    (t (setq w (if (cdr (assoc 'WIDTH el)) (cdr (assoc 'WIDTH el)) 0.0))))
   (list x (+ x w)))
 
 (defun mk:el-yrange (el / y h)
   (setq y (cadr (cdr (assoc 'INS_PT el))))
-  (if (= (cdr (assoc 'TYPE el)) "РИГЕЛЬ")
-    (setq h 0.0)
-    (setq h (if (cdr (assoc 'HEIGHT el)) (cdr (assoc 'HEIGHT el)) 0.0)))
+  (cond
+    ((mk:rec-get el 'VERT)
+     (setq h (if (cdr (assoc 'LENGTH el)) (cdr (assoc 'LENGTH el)) 0.0)))
+    ((= (cdr (assoc 'TYPE el)) "РИГЕЛЬ") (setq h 0.0))
+    (t (setq h (if (cdr (assoc 'HEIGHT el)) (cdr (assoc 'HEIGHT el)) 0.0))))
   (list y (+ y h)))
 
 (defun mk:overlap? (lo1 hi1 lo2 hi2)
@@ -2136,7 +2150,10 @@
     (setq beam (mk:rec-put beam 'LEN_Q lq))
     (setq beam (mk:rec-put beam 'LEN_IDX (mk:scale-index lq scale)))
     (setq beam (mk:rec-put beam 'SIZE_MARK mark))
-    (setq beam (mk:rec-put beam 'GROUP_KEY (strcat len "_" art "_" suffix)))
+    (setq beam (mk:rec-put beam 'GROUP_KEY
+                 (strcat len "_" art "_" suffix
+                         "_" (if (mk:rec-get beam 'TJOINT) (mk:rec-get beam 'TJOINT) "")
+                         "_" (if (mk:rec-get beam 'VERT) *mk:suffix-vert-beam* ""))))
     (setq out (cons beam out)))
   (reverse out))
 
@@ -2176,6 +2193,9 @@
     (foreach k (mk:unique-keys grp 'GROUP_KEY)
       (setq sub  (mk:filter-by grp 'GROUP_KEY k)
             mark (strcat prefix " Рг" (itoa idx)
+                         (if (mk:rec-get (car sub) 'VERT) *mk:suffix-vert-beam* "")
+                         (if (mk:rec-get (car sub) 'TJOINT)
+                           (mk:rec-get (car sub) 'TJOINT) "")
                          (if (mk:rec-get (car sub) 'SIZE_MARK)
                            (mk:rec-get (car sub) 'SIZE_MARK) "")
                          (if (mk:rec-get (car sub) 'SUFFIX)
@@ -2282,7 +2302,7 @@
   (if (null p)
     nil
     (progn
-      (if (= etype "СТОЙКА")
+      (if (or (= etype "СТОЙКА") (mk:rec-get el 'VERT))
         (setq x   (- (car p) (/ cross 2.0) *mk:label-offset*)
               y   (+ (cadr p) (- len *mk:label-end-gap*))
               rot *mk:label-rot-post*
@@ -2356,6 +2376,90 @@
   (list count skip-count lab-count))
 
 ;; Сбор всех типов элементов из выборки
+;;;---------------------------------------------------------------------
+;;; Т-СОЕДИНЕНИЯ
+;;; Т-соединение — вертикальный элемент упирается торцом в ригель внутри его
+;;; пролёта (не на конце). Такому ригелю даётся суффикс:
+;;;   .1 — если Т строго по центру длины ригеля (и у пары ригелей один артикул
+;;;        либо артикула нет) или если ригель расположен снизу от стойки;
+;;;   .2 — ригель сверху от стойки в несимметричном узле.
+;;; Вертикальный элемент с двумя Т-соединениями считается ригелем (суффикс «т»),
+;;; с одним — остаётся стойкой.
+;;;---------------------------------------------------------------------
+(defun mk:beam-hit (x y beams / out p bx0 bx1 by len)
+  (setq out nil)
+  (foreach b beams
+    (if (null out)
+      (progn
+        (setq p   (cdr (assoc 'INS_PT b))
+              len (if (numberp (cdr (assoc 'LENGTH b))) (cdr (assoc 'LENGTH b)) 0.0))
+        (if p
+          (progn
+            (setq bx0 (car p) bx1 (+ (car p) len) by (cadr p))
+            (if (and (<= (abs (- y by)) *mk:tol-tjoint*)
+                     (> x (+ bx0 *mk:tol-tjoint*))
+                     (< x (- bx1 *mk:tol-tjoint*)))
+              (setq out b)))))))
+  out)
+
+;; Т-точка по центру длины ригеля?
+(defun mk:t-centered? (beam x / p len)
+  (setq p   (cdr (assoc 'INS_PT beam))
+        len (if (numberp (cdr (assoc 'LENGTH beam))) (cdr (assoc 'LENGTH beam)) 0.0))
+  (and p (> len 0.0)
+       (<= (abs (- x (+ (car p) (/ len 2.0)))) *mk:tol-tcenter*)))
+
+(defun mk:art-of (el)
+  (if (and el (mk:strp (mk:rec-get el 'ARTICLE))) (strcase (mk:rec-get el 'ARTICLE)) ""))
+
+;; Карта суффиксов: ключ — ENAME ригеля; «.1» имеет приоритет над «.2»
+(defun mk:tj-put (map beam sfx / e hit)
+  (setq e (mk:rec-get beam 'ENAME))
+  (if (null e)
+    map
+    (progn
+      (setq hit (assoc e map))
+      (cond
+        ((null hit) (cons (cons e sfx) map))
+        ((= (cdr hit) *mk:suffix-tjoint-lo*) map)
+        (t (subst (cons e sfx) hit map))))))
+
+;; Разбор узлов: возвращает (стойки ригели)
+(defun mk:split-tjoints (posts beams / map newposts newbeams p len vx vy0 vy1
+                                       bb ba cb ca nT e hit)
+  (setq map nil newposts nil newbeams nil)
+  (foreach v posts
+    (setq p   (cdr (assoc 'INS_PT v))
+          len (if (numberp (cdr (assoc 'LENGTH v))) (cdr (assoc 'LENGTH v)) 0.0))
+    (if (null p)
+      (setq newposts (cons v newposts))
+      (progn
+        (setq vx  (car p) vy0 (cadr p) vy1 (+ (cadr p) len)
+              bb  (mk:beam-hit vx vy0 beams)      ; ригель снизу
+              ba  (mk:beam-hit vx vy1 beams)      ; ригель сверху
+              cb  (and bb (mk:t-centered? bb vx))
+              ca  (and ba (mk:t-centered? ba vx)))
+        (if (and bb ba cb ca (= (mk:art-of bb) (mk:art-of ba)))
+          (setq map (mk:tj-put (mk:tj-put map bb *mk:suffix-tjoint-lo*)
+                               ba *mk:suffix-tjoint-lo*))
+          (progn
+            (if bb (setq map (mk:tj-put map bb *mk:suffix-tjoint-lo*)))
+            (if ba (setq map (mk:tj-put map ba *mk:suffix-tjoint-hi*)))))
+        (setq nT (+ (if bb 1 0) (if ba 1 0)))
+        (if (= nT 2)
+          ;; вертикальный элемент между двумя ригелями -> это ригель
+          (setq newbeams (cons (mk:rec-put (mk:rec-put v 'TYPE "РИГЕЛЬ") 'VERT t)
+                               newbeams))
+          (setq newposts (cons v newposts))))))
+  ;; проставить суффиксы Т-соединений ригелям
+  (setq beams (mapcar
+                '(lambda (b / e hit)
+                   (setq e   (mk:rec-get b 'ENAME)
+                         hit (if e (assoc e map) nil))
+                   (if hit (mk:rec-put b 'TJOINT (cdr hit)) b))
+                beams))
+  (list (reverse newposts) (append beams (reverse newbeams))))
+
 (defun mk:collect-scope (ss / posts beams fills windows doors res mlines)
   (cond
     ;; режим последнего сбора: «Все-типы» — каркас из любой геометрии + блоков
@@ -2379,6 +2483,9 @@
                    (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*"))))))
   (setq posts (mk:sanitize-frame posts "Стойки"))
   (setq beams (mk:sanitize-frame beams "Ригели"))
+  (setq res   (mk:split-tjoints posts beams)
+        posts (nth 0 res)
+        beams (nth 1 res))
   (setq fills   (mk:sanitize-panels
                   (mapcar 'mk:collect-fill (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
                   "Заполнения"))
@@ -2536,6 +2643,9 @@
      (setq beams (mapcar 'mk:collect-beam beam-enames))))
   (setq posts (mk:sanitize-frame posts "Стойки"))
   (setq beams (mk:sanitize-frame beams "Ригели"))
+  (setq res   (mk:split-tjoints posts beams)
+        posts (nth 0 res)
+        beams (nth 1 res))
   (setq fills   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
   (setq windows (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*")))
   (setq doors   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door* "*")))
