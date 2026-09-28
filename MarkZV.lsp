@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.3")
+(setq *mk:ver*            "2.4")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -186,6 +186,7 @@
 (setq *mk:suffix-tjoint-lo*     ".1")   ; ригель под вертикальным элементом
 (setq *mk:suffix-tjoint-hi*     ".2")   ; ригель над вертикальным элементом
 (setq *mk:suffix-vert-beam*     "т")    ; вертикальный элемент с двумя Т
+(setq *mk:label-short-len*      400.0)  ; короткий ригель: подпись по центру
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -2053,12 +2054,27 @@
   (setq vals nil)
   (foreach b beams
     (setq v (mk:rec-get b 'LENGTH))
-    (if (numberp v) (setq vals (cons (atof (mk:size-key v)) vals))))
+    ;; вертикальные ригели («т») нумеруются отдельно, после всех обычных,
+    ;; чтобы не сдвигать соответствие номеров с заполнениями
+    (if (and (numberp v) (null (mk:rec-get b 'VERT)))
+      (setq vals (cons (atof (mk:size-key v)) vals))))
   (foreach pn panels
     (if (= (mk:rec-get pn 'TYPE) "ЗАПОЛНЕНИЕ")
       (progn
         (setq v (mk:rec-get pn 'WIDTH))
         (if (numberp v) (setq vals (cons (atof (mk:size-key v)) vals))))))
+  (setq out nil)
+  (foreach v (vl-sort vals '<)
+    (if (not (member v out)) (setq out (cons v out))))
+  (reverse out))
+
+;; Шкала длин вертикальных ригелей (только они, по возрастанию)
+(defun mk:vert-scale (beams / vals v out)
+  (setq vals nil)
+  (foreach b beams
+    (setq v (mk:rec-get b 'LENGTH))
+    (if (and (numberp v) (mk:rec-get b 'VERT))
+      (setq vals (cons (atof (mk:size-key v)) vals))))
   (setq out nil)
   (foreach v (vl-sort vals '<)
     (if (not (member v out)) (setq out (cons v out))))
@@ -2128,11 +2144,12 @@
 ;; Разметка ригелей: TOP_ELEM / BOT_ELEM / SUFFIX / BAY / SIZE_MARK / GROUP_KEY
 (defun mk:annotate-beams (beams all-panels doors bounds posts /
                           out suffix len art axes table mark bay rows row
-                          scale lq)
+                          scale vscale lq)
   (setq out   nil
         axes  (mk:post-axes posts)
         rows  (mk:row-levels beams)
         scale (mk:length-scale beams all-panels)
+        vscale (mk:vert-scale beams)
         table (mk:size-mark-table beams))
   (foreach beam beams
     (setq beam (mk:rec-put beam 'TOP_ELEM (mk:find-top-element beam all-panels)))
@@ -2148,7 +2165,10 @@
     (setq beam (mk:rec-put beam 'ROW row))
     (setq lq (atof len))
     (setq beam (mk:rec-put beam 'LEN_Q lq))
-    (setq beam (mk:rec-put beam 'LEN_IDX (mk:scale-index lq scale)))
+    (setq beam (mk:rec-put beam 'LEN_IDX
+                 (if (mk:rec-get beam 'VERT)
+                   (+ (length scale) (mk:scale-index lq vscale))
+                   (mk:scale-index lq scale))))
     (setq beam (mk:rec-put beam 'SIZE_MARK mark))
     (setq beam (mk:rec-put beam 'GROUP_KEY
                  (strcat len "_" art "_" suffix
@@ -2292,7 +2312,12 @@
      nil)))
 
 ;; Точка и поворот подписи: (точка поворот шаг-строки-по-X шаг-по-Y)
-(defun mk:label-anchor (el / p len cross etype x y rot dx dy step)
+;; Окно над ригелем -> подпись зеркалится под ригель
+(defun mk:beam-window-above? (el / top)
+  (setq top (mk:rec-get el 'TOP_ELEM))
+  (and top (= (cdr (assoc 'TYPE top)) "ОКНО")))
+
+(defun mk:label-anchor (el / p len cross etype x y rot dx dy step just below)
   (setq p     (cdr (assoc 'INS_PT el))
         len   (if (numberp (cdr (assoc 'LENGTH el))) (cdr (assoc 'LENGTH el)) 0.0)
         cross (if (numberp (mk:rec-get el 'CROSS)) (mk:rec-get el 'CROSS) 0.0)
@@ -2302,21 +2327,32 @@
   (if (null p)
     nil
     (progn
+      (setq just 2)                                  ; по умолчанию — вправо
       (if (or (= etype "СТОЙКА") (mk:rec-get el 'VERT))
-        (setq x   (- (car p) (/ cross 2.0) *mk:label-offset*)
-              y   (+ (cadr p) (- len *mk:label-end-gap*))
-              rot *mk:label-rot-post*
-              dx  (- step)
-              dy  0.0)
-        (setq x   (+ (car p) (- len *mk:label-end-gap*))
-              y   (+ (cadr p) (/ cross 2.0) *mk:label-offset*)
-              rot 0.0
-              dx  0.0
-              dy  step))
-      (list (list x y 0.0) rot dx dy))))
+        (progn
+          (setq x   (- (car p) (/ cross 2.0) *mk:label-offset*)
+                rot *mk:label-rot-post*
+                dx  (- step)
+                dy  0.0)
+          (if (< len *mk:label-short-len*)            ; короткий — по центру
+            (setq y (+ (cadr p) (/ len 2.0)) just 1)
+            (setq y (+ (cadr p) (- len *mk:label-end-gap*)))))
+        (progn
+          (setq below (mk:beam-window-above? el)      ; окно сверху -> текст снизу
+                rot   0.0
+                dx    0.0)
+          (if below
+            (setq y  (- (cadr p) (/ cross 2.0) *mk:label-offset* *mk:label-height*)
+                  dy (- step))
+            (setq y  (+ (cadr p) (/ cross 2.0) *mk:label-offset*)
+                  dy step))
+          (if (< len *mk:label-short-len*)            ; короткий — по центру
+            (setq x (+ (car p) (/ len 2.0)) just 1)
+            (setq x (+ (car p) (- len *mk:label-end-gap*))))))
+      (list (list x y 0.0) rot dx dy just))))
 
 ;; Одна строка текста с выравниванием вправо
-(defun mk:label-text (pt rot str / dxf sty)
+(defun mk:label-text (pt rot str just / dxf sty)
   (setq dxf (list '(0 . "TEXT")
                   (cons 8 *mk:layer-label*)
                   (cons 10 pt)
@@ -2324,7 +2360,7 @@
                   (cons 1 str)
                   (cons 50 (* pi (/ rot 180.0)))
                   (cons 62 *mk:label-color*)
-                  '(72 . 2)                       ; выравнивание: вправо
+                  (cons 72 just)                  ; 2 - вправо, 1 - по центру
                   '(73 . 0)
                   (cons 11 pt)))
   (if (setq sty (mk:label-style-name))
@@ -2332,7 +2368,7 @@
   (entmakex dxf))
 
 ;; Выноска: марка, а следом артикул (если он известен)
-(defun mk:label-mark (el mark-str / anc pt rot dx dy art e n)
+(defun mk:label-mark (el mark-str / anc pt rot dx dy just art e n)
   (setq anc (mk:label-anchor el)
         art (mk:rec-get el 'ARTICLE)
         n   0)
@@ -2340,12 +2376,14 @@
     nil
     (progn
       (mk:ensure-layer *mk:layer-label* *mk:label-color*)
-      (setq pt (nth 0 anc) rot (nth 1 anc) dx (nth 2 anc) dy (nth 3 anc))
-      (if (setq e (mk:label-text pt rot mark-str))
+      (setq pt   (nth 0 anc) rot (nth 1 anc)
+            dx   (nth 2 anc) dy  (nth 3 anc)
+            just (if (nth 4 anc) (nth 4 anc) 2))
+      (if (setq e (mk:label-text pt rot mark-str just))
         (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n))))
       (if (and (mk:strp art) (> (strlen art) 0))
         (if (setq e (mk:label-text (list (+ (car pt) dx) (+ (cadr pt) dy) 0.0)
-                                   rot art))
+                                   rot art just))
           (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n)))))
       (> n 0))))
 
