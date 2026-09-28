@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.7")
+(setq *mk:ver*            "2.8")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -254,7 +254,7 @@
     ("КП45371" . 46.0)
     ("КПС372" . 46.0)
     ("КП45388" . 48.0)
-    ("КПС009БЕЗУСОВ" . 54.0)
+    ("КПС009" . 54.0)
     ("КП45369" . 68.0)
     ("КПС371" . 68.0)
     ("КП45303-2" . 70.0)
@@ -271,46 +271,46 @@
     ("КП45302-1" . 100.0)
     ("КП45302-2" . 100.0)
     ("КП45370" . 104.0)
-    ("КПС1272ОБЛЕГЧ." . 104.0)
+    ("КПС1272" . 104.0)
     ("КПС818" . 104.0)
     ("КПС1164" . 106.0)
     ("КПС1161" . 110.0)
     ("КПС1163" . 110.0)
-    ("КПС298ГН.УСЫ" . 114.0)
+    ("КПС298" . 114.0)
     ("КП45551" . 116.0)
     ("КП45551-3" . 116.0)
     ("КП45548" . 120.0)
     ("КП45550" . 120.0)
-    ("КПС1275ОБЛЕГЧ." . 120.0)
+    ("КПС1275" . 120.0)
     ("КП45562" . 128.0)
     ("КПС1165" . 130.0)
-    ("КПС299ГН.УСЫ" . 130.0)
+    ("КПС299" . 130.0)
     ("КП45387" . 144.0)
     ("КП45372" . 148.0)
     ("КПС344" . 148.0)
-    ("КПС491УГЛ." . 148.0)
+    ("КПС491" . 148.0)
     ("КПС927" . 152.0)
     ("КПС924" . 155.0)
     ("КПС926" . 155.0)
-    ("КПС492ГН.УСЫ" . 158.0)
+    ("КПС492" . 158.0)
     ("КПС584" . 165.0)
     ("КПС586" . 165.0)
     ("КП45364" . 172.0)
     ("КП45392" . 178.0)
     ("КПС345" . 178.0)
-    ("КПС494ГН.УСЫ" . 187.0)
+    ("КПС494" . 187.0)
     ("КПС170" . 200.0)
     ("КПС634" . 205.0)
     ("КПС636" . 205.0)
     ("КПС015" . 210.0)
     ("КПС014" . 215.0)
     ("КПС475" . 215.0)
-    ("КПС496ГН.УСЫ" . 224.0)
+    ("КПС496" . 224.0)
     ("КПС171" . 235.0)
     ("КПС370" . 240.0)
     ("КПС426" . 240.0)
     ("КПС718" . 240.0)
-    ("КПС1025ГН.УСЫ" . 250.0)
+    ("КПС1025" . 250.0)
     ("КПС633" . 270.0)
     ("КПС829" . 270.0)
     ("КПС437" . 280.0)
@@ -784,14 +784,89 @@
         (setq i (1+ i)))))
   out)
 
-;; Артикул источника: имя стиля мультилинии (DXF 2), иначе имя слоя
-(defun mk:ent-article (e / ed a)
+;;; Подбор артикула «по похожести»: если явный артикул в строке не найден,
+;;; строка сравнивается со всеми артикулами зарегистрированных баз.
+;;; Совпадением считается вхождение артикула в очищенную строку
+;;; (без пробелов, точек, дефисов, скобок, в ВЕРХНЕМ регистре) либо вхождение
+;;; его цифровой части (от 4 цифр). Берётся самое длинное совпадение.
+(setq *mk:art-guess-cache* nil)      ; строка -> артикул или "" (не найден)
+(setq *mk:art-guess-log*   nil)      ; что и как распозналось
+
+;; Строка без пробелов и разделителей, ВЕРХНИЙ регистр
+(defun mk:squash (s / out i c)
+  (if (not (mk:strp s))
+    ""
+    (progn
+      (setq out "" i 1 s (strcase s))
+      (while (<= i (strlen s))
+        (setq c (substr s i 1))
+        (if (null (member c (list " " (chr 9) "." "," "-" "_" "(" ")")))
+          (setq out (strcat out c)))
+        (setq i (1+ i)))
+      out)))
+
+;; Есть ли подстрока needle в hay?
+(defun mk:str-in? (needle hay / n h i out)
+  (setq n (strlen needle) h (strlen hay) i 1 out nil)
+  (if (and (> n 0) (>= h n))
+    (while (and (<= i (1+ (- h n))) (null out))
+      (if (= (substr hay i n) needle) (setq out t))
+      (setq i (1+ i))))
+  out)
+
+;; Только цифры артикула («КПС1155» -> «1155»)
+(defun mk:digits-of (s / out i c)
+  (setq out "" i 1)
+  (while (<= i (strlen s))
+    (setq c (substr s i 1))
+    (if (member c '("0" "1" "2" "3" "4" "5" "6" "7" "8" "9"))
+      (setq out (strcat out c)))
+    (setq i (1+ i)))
+  out)
+
+;; Подбор артикула по всем базам
+(defun mk:article-guess (name / key best bestlen d hit)
+  (setq key (mk:squash name) best nil bestlen 0)
+  (if (> (strlen key) 3)
+    (progn
+      (setq hit (assoc key *mk:art-guess-cache*))
+      (if hit
+        (setq best (if (> (strlen (cdr hit)) 0) (cdr hit) nil))
+        (progn
+          ;; 1) артикул целиком входит в строку
+          (foreach b *mk:size-bases*
+            (foreach pair (cdr b)
+              (if (and (> (strlen (car pair)) bestlen)
+                       (mk:str-in? (mk:squash (car pair)) key))
+                (setq best (car pair) bestlen (strlen (car pair))))))
+          ;; 2) иначе — совпадение по цифровой части (от 4 цифр)
+          (if (null best)
+            (foreach b *mk:size-bases*
+              (foreach pair (cdr b)
+                (setq d (mk:digits-of (car pair)))
+                (if (and (>= (strlen d) 4)
+                         (> (strlen d) bestlen)
+                         (mk:str-in? d key))
+                  (setq best (car pair) bestlen (strlen d))))))
+          (setq *mk:art-guess-cache*
+                (cons (cons key (if best best "")) *mk:art-guess-cache*))
+          (if best
+            (setq *mk:art-guess-log*
+                  (cons (strcat name " -> " best) *mk:art-guess-log*)))))))
+  best)
+
+;; Артикул источника: имя стиля мультилинии (DXF 2), иначе имя слоя;
+;; сначала явный разбор, затем подбор по базам
+(defun mk:ent-article (e / ed a nm ly)
   (setq ed (if e (entget e) nil) a nil)
   (if ed
     (progn
-      (if (= (cdr (assoc 0 ed)) "MLINE")
-        (setq a (mk:article-from-name (cdr (assoc 2 ed)))))
-      (if (null a) (setq a (mk:article-from-name (cdr (assoc 8 ed)))))))
+      (setq nm (if (= (cdr (assoc 0 ed)) "MLINE") (cdr (assoc 2 ed)) nil)
+            ly (cdr (assoc 8 ed)))
+      (if nm (setq a (mk:article-from-name nm)))
+      (if (null a) (setq a (mk:article-from-name ly)))
+      (if (and (null a) nm) (setq a (mk:article-guess nm)))
+      (if (null a) (setq a (mk:article-guess ly)))))
   a)
 
 ;; Отрезки одного объекта: список (x0 y0 x1 y1)
@@ -3498,6 +3573,10 @@
       (prompt (strcat "\n  " (car b) " — записей: " (itoa (length (cdr b)))))))
   (prompt (strcat "\n  Префиксы артикулов: "
                   (mk:join *mk:article-prefixes* ", ")))
+  (if *mk:art-guess-log*
+    (progn
+      (prompt "\n  Артикулы, подобранные по похожести имени:")
+      (foreach r (reverse *mk:art-guess-log*) (prompt (strcat "\n    " r)))))
   (prompt (strcat "\n  Файл внешних баз: " *mk:bases-file*
                   (if (findfile *mk:bases-file*) " (найден)" " (не найден)")))
   (princ))
