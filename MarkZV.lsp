@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.3")
+(setq *mk:ver*            "3.4")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -142,6 +142,7 @@
 (setq *mk:suffix-warm-cold*     "тх")
 (setq *mk:suffix-cold-warm*     "хт")
 (setq *mk:mirror-suffixes*      '(".1" ".2"))  ; зеркальная пара: Ст1.1 / Ст1.2
+(setq *mk:conn-none*            "ПРИМЫКАНИЕ")  ; сторона без элементов каркаса
 (setq *mk:suffix-small*         "м")     ; малый профиль
 (setq *mk:suffix-big*           "б")     ; большой профиль
 ;; Ручная таблица артикул -> "м"/"б" (приоритет над автоопределением по габариту).
@@ -193,7 +194,8 @@
 (setq *mk:join-posts-gap*       0.0)
 (setq *mk:join-beams-gap*       0.0)
 ;; Выноски марок для элементов без атрибута «Марка»
-(setq *mk:layer-label*          "Обозначения")   ; слой выносок
+(setq *mk:layer-label*          "Маркировка")    ; слой выносок
+(setq *mk:layer-table*          "Размеры")       ; слой таблиц
 (setq *mk:group-label*          "Марки_выноски")  ; группа выносок
 (setq *mk:label-color*          2)                ; жёлтый
 (setq *mk:label-style*          "Основной стиль (надписи без наклона)")
@@ -208,8 +210,9 @@
 ;;; Т-соединения
 (setq *mk:tol-tjoint*           30.0)   ; допуск примыкания торца к ригелю
 (setq *mk:tol-tcenter*          30.0)   ; допуск «Т строго по центру ригеля»
-(setq *mk:suffix-tjoint-lo*     ".1")   ; ригель под вертикальным элементом
-(setq *mk:suffix-tjoint-hi*     ".2")   ; ригель над вертикальным элементом
+(setq *mk:suffix-tjoint-lo*     ".1")   ; Т-соединение снизу (импост идёт вверх)
+(setq *mk:suffix-tjoint-hi*     ".2")   ; Т-соединение сверху (импост идёт вниз)
+(setq *mk:suffix-tjoint-both*   ".3")   ; Т-соединения с обеих сторон
 (setq *mk:suffix-vert-beam*     "т")    ; вертикальный элемент с двумя Т
 (setq *mk:label-short-len*      400.0)  ; короткий ригель: подпись по центру
 ;; Надпись длины L=xxx мм по оси элемента
@@ -2010,6 +2013,17 @@
     (if (not (member v out)) (setq out (cons v out))))
   (reverse out))
 
+;; Дополнить строку пробелами справа / слева до ширины n
+(defun mk:pad (s n)
+  (if (not (mk:strp s)) (setq s ""))
+  (while (< (strlen s) n) (setq s (strcat s " ")))
+  s)
+
+(defun mk:padl (s n)
+  (if (not (mk:strp s)) (setq s ""))
+  (while (< (strlen s) n) (setq s (strcat " " s)))
+  s)
+
 (defun mk:join (lst sep / out first)
   (setq out "" first t)
   (foreach s lst
@@ -2081,7 +2095,7 @@
                    (mk:overlap? (car yr) (cadr yr) (car span) (cadr span))
                    (not (member typ out)))
             (setq out (cons typ out)))))))
-  (if out (mk:join (vl-sort out '<) "+") "ПУСТО"))
+  (if out (mk:join (vl-sort out '<) "+") *mk:conn-none*))
 
 ;; Подробная «подпись» стороны: тип + отметки примыкания относительно низа
 ;; стойки. Две стойки зеркальны, только если подписи сторон совпадают
@@ -2104,7 +2118,7 @@
             (setq out (cons (strcat typ ":" (mk:size-key (- (car yr) base))
                                     "-" (mk:size-key (- (cadr yr) base)))
                             out)))))))
-  (if out (mk:join (vl-sort out '<) "+") "ПУСТО"))
+  (if out (mk:join (vl-sort out '<) "+") *mk:conn-none*))
 
 ;; Разметка стоек: LEFT_TYPES / RIGHT_TYPES / ORIENT / GROUP_KEY
 (defun mk:annotate-posts (posts elements / axes out x lt rt ls rs art len canon)
@@ -2267,7 +2281,7 @@
 
 ;; Таблица артикул -> "м"/"б": по габариту сечения (минимальный/максимальный).
 ;; Если артикул один — таблица пустая (маркер не нужен).
-(defun mk:size-mark-table (elements / pairs sorted out)
+(defun mk:size-mark-table (elements / pairs sorted out i)
   (setq pairs (mk:article-cross-pairs elements) out nil)
   (if (> (length pairs) 1)
     (progn
@@ -2277,11 +2291,17 @@
         (prompt (strcat "\n  [WARN] Габариты сечений артикулов ригелей одинаковы"
                         " — маркеры м/б не присвоены. Задайте *mk:article-size*."))
         (progn
+          ;; наименьший -> «м», наибольший -> «б», промежуточные -> «м2», «м3» …
           (setq out (list (cons (car (car sorted))  *mk:suffix-small*)
                           (cons (car (last sorted)) *mk:suffix-big*)))
+          (setq i 2)
+          (foreach pr (cdr (reverse (cdr (reverse sorted))))   ; без первого и последнего
+            (setq out (cons (cons (car pr)
+                                  (strcat *mk:suffix-small* (itoa i))) out))
+            (setq i (1+ i)))
           (if (> (length pairs) 2)
             (prompt (strcat "\n  [INFO] Артикулов ригелей: " (itoa (length pairs))
-                            " — м у наименьшего, б у наибольшего, остальные без маркера.")))))))
+                            " — м у наименьшего, б у наибольшего, промежуточные м2, м3 …")))))))
   out)
 
 (defun mk:size-mark (art table)
@@ -2622,20 +2642,31 @@
   (if (and el (mk:strp (mk:rec-get el 'ARTICLE))) (strcase (mk:rec-get el 'ARTICLE)) ""))
 
 ;; Карта суффиксов: ключ — ENAME ригеля; «.1» имеет приоритет над «.2»
-(defun mk:tj-put (map beam sfx / e hit)
+;; Накопление ролей ригеля в Т-узлах: ключ ENAME -> (есть-снизу есть-сверху)
+(defun mk:tj-put (map beam role / e hit lo hi)
   (setq e (mk:rec-get beam 'ENAME))
   (if (null e)
     map
     (progn
-      (setq hit (assoc e map))
-      (cond
-        ((null hit) (cons (cons e sfx) map))
-        ((= (cdr hit) *mk:suffix-tjoint-lo*) map)
-        (t (subst (cons e sfx) hit map))))))
+      (setq hit (assoc e map)
+            lo  (if hit (nth 0 (cdr hit)) nil)
+            hi  (if hit (nth 1 (cdr hit)) nil))
+      (if (= role 'lo) (setq lo t) (setq hi t))
+      (if hit
+        (subst (cons e (list lo hi)) hit map)
+        (cons (cons e (list lo hi)) map)))))
+
+;; Роли -> суффикс
+(defun mk:tj-suffix (roles)
+  (cond
+    ((and (nth 0 roles) (nth 1 roles)) *mk:suffix-tjoint-both*)
+    ((nth 0 roles) *mk:suffix-tjoint-lo*)
+    ((nth 1 roles) *mk:suffix-tjoint-hi*)
+    (t nil)))
 
 ;; Разбор узлов: возвращает (стойки ригели)
 (defun mk:split-tjoints (posts beams / map newposts newbeams p len vx vy0 vy1
-                                       bb ba cb ca nT e hit)
+                                       bb ba nT e hit)
   (setq map nil newposts nil newbeams nil)
   (foreach v posts
     (setq p   (cdr (assoc 'INS_PT v))
@@ -2644,16 +2675,11 @@
       (setq newposts (cons v newposts))
       (progn
         (setq vx  (car p) vy0 (cadr p) vy1 (+ (cadr p) len)
-              bb  (mk:beam-hit vx vy0 beams)      ; ригель снизу
-              ba  (mk:beam-hit vx vy1 beams)      ; ригель сверху
-              cb  (and bb (mk:t-centered? bb vx))
-              ca  (and ba (mk:t-centered? ba vx)))
-        (if (and bb ba cb ca (= (mk:art-of bb) (mk:art-of ba)))
-          (setq map (mk:tj-put (mk:tj-put map bb *mk:suffix-tjoint-lo*)
-                               ba *mk:suffix-tjoint-lo*))
-          (progn
-            (if bb (setq map (mk:tj-put map bb *mk:suffix-tjoint-lo*)))
-            (if ba (setq map (mk:tj-put map ba *mk:suffix-tjoint-hi*)))))
+              bb  (mk:beam-hit vx vy0 beams)      ; ригель снизу от импоста
+              ba  (mk:beam-hit vx vy1 beams))     ; ригель сверху от импоста
+        ;; для нижнего ригеля Т приходит сверху -> роль lo, для верхнего -> hi
+        (if bb (setq map (mk:tj-put map bb 'lo)))
+        (if ba (setq map (mk:tj-put map ba 'hi)))
         (setq nT (+ (if bb 1 0) (if ba 1 0)))
         (if (= nT 2)
           ;; вертикальный элемент между двумя ригелями -> это ригель
@@ -2665,7 +2691,7 @@
                 '(lambda (b / e hit)
                    (setq e   (mk:rec-get b 'ENAME)
                          hit (if e (assoc e map) nil))
-                   (if hit (mk:rec-put b 'TJOINT (cdr hit)) b))
+                   (if hit (mk:rec-put b 'TJOINT (mk:tj-suffix (cdr hit))) b))
                 beams))
   (list (reverse newposts) (append beams (reverse newbeams))))
 
@@ -2733,8 +2759,9 @@
       (setq doc (mk:undo-begin))
       (foreach item plan
         (setq res (mk:write-marks (cadr item) (car item)))
-        (prompt (strcat "\n  " (car item) " — шт.: " (itoa (length (cadr item)))
-                        "   [" (mk:rec-get (car (cadr item)) 'LEFT_TYPES)
+        (prompt (strcat "\n  " (mk:pad (car item) 16)
+                        " шт.: " (mk:padl (itoa (length (cadr item))) 3)
+                        "   [" (mk:pad (mk:rec-get (car (cadr item)) 'LEFT_TYPES) 18)
                         " | " (mk:rec-get (car (cadr item)) 'RIGHT_TYPES) "]"))
         (setq count      (+ count (car res))
               skip-count (+ skip-count (cadr res))
@@ -2777,7 +2804,8 @@
       (setq doc (mk:undo-begin))
       (foreach item plan
         (setq res (mk:write-marks (cadr item) (car item)))
-        (prompt (strcat "\n  " (car item) " — шт.: " (itoa (length (cadr item)))))
+        (prompt (strcat "\n  " (mk:pad (car item) 16)
+                        " шт.: " (mk:padl (itoa (length (cadr item))) 3)))
         (setq count      (+ count (car res))
               skip-count (+ skip-count (cadr res))
               lab-count  (+ lab-count (caddr res))))
@@ -3230,8 +3258,11 @@
                 nRows    (+ 3 (length data) n-sec)
                 old-echo (getvar "CMDECHO"))
           (vl-catch-all-apply 'setvar (list "CMDECHO" 0))
+          (mk:ensure-layer *mk:layer-table* 7)
           (setq tbl (vl-catch-all-apply 'vla-AddTable
                       (list space (vlax-3d-point pt) nRows nCols 10.0 35.0)))
+          (if (not (vl-catch-all-error-p tbl))
+            (vl-catch-all-apply 'vla-put-Layer (list tbl *mk:layer-table*)))
           (if (vl-catch-all-error-p tbl)
             (progn
               (prompt (strcat "\n  [ERROR] AddTable: "
@@ -3319,7 +3350,7 @@
               (vl-catch-all-apply 'setvar (list "CMDECHO" old-echo))
               (prompt (strcat "\n  [OK] Таблица создана, строк данных: "
                               (itoa (length data))))
-              t)))))))
+              (list tbl pt))))))))
 
 ;;;--- XLS (SpreadsheetML 2003) -----------------------------------------
 (defun mk:xml-esc (str / out ch)
@@ -3392,7 +3423,7 @@
   (write-line "   </Borders>" f)
   (write-line "  </Style>" f))
 
-(defun mk:tab-xls (data file / f rec sect art mark len cnt mp cur
+(defun mk:tab-xls (data file acc / f rec sect art mark len cnt mp cur
                      xl-row grp-start sub-rows n-no cnt-sub mp-sub
                      total-cnt total-mp hdr w0)
   (setq f (open file "w"))
@@ -3482,14 +3513,163 @@
       (write-line "   </Row>" f)
       (write-line "  </Table>" f)
       (write-line " </Worksheet>" f)
+      (mk:acc-xls acc f)
       (write-line "</Workbook>" f)
       (close f)
       (prompt (strcat "\n  [OK] XLS: " file))
       t)))
 
+;;;=====================================================================
+;;; 20c. КОМПЛЕКТУЮЩИЕ: атрибуты «Пятка*» и «Кронштейн*» динамических блоков
+;;;   Собираются только у вставок блоков (мультилинии игнорируются),
+;;;   агрегируются по паре «атрибут + значение» и выводятся второй таблицей.
+;;;=====================================================================
+(setq *mk:acc-masks*    '("Пятка*" "Кронштейн*"))
+(setq *mk:acc-gap*      30.0)   ; отступ второй таблицы от первой
+(setq *mk:acc-title*    "Ведомость комплектующих")
+(setq *mk:acc-empty*    '("" "-" "—" "НЕТ" "НЕА" "0"))
+
+;; Все атрибуты вставки: список (тег . значение)
+(defun mk:attr-list (ename / sub data out)
+  (setq out nil)
+  (if (mk:has-attrs-insert? ename)
+    (progn
+      (setq sub (entnext ename))
+      (while sub
+        (setq data (entget sub))
+        (cond
+          ((null data) (setq sub nil))
+          ((= (cdr (assoc 0 data)) "ATTRIB")
+           (setq out (cons (cons (mk:trim (cdr (assoc 2 data)))
+                                 (mk:trim (cdr (assoc 1 data)))) out)))
+          ((= (cdr (assoc 0 data)) "SEQEND") (setq sub nil)))
+        (if sub (setq sub (entnext sub))))))
+  (reverse out))
+
+(defun mk:acc-mask-hit? (tag / hit)
+  (setq hit nil)
+  (foreach m *mk:acc-masks*
+    (if (and (null hit) (mk:strp tag) (wcmatch (strcase tag) (strcase m)))
+      (setq hit t)))
+  hit)
+
+(defun mk:acc-empty? (v)
+  (or (not (mk:strp v))
+      (= (strlen (mk:trim v)) 0)
+      (member (strcase (mk:trim v)) *mk:acc-empty*)))
+
+;; Агрегация: ((тег значение кол-во) ...)
+(defun mk:acc-rows (elements / out key hit tag val)
+  (setq out nil)
+  (foreach el elements
+    (foreach pair (mk:attr-list (mk:rec-get el 'ENAME))
+      (setq tag (car pair) val (cdr pair))
+      (if (and (mk:acc-mask-hit? tag) (not (mk:acc-empty? val)))
+        (progn
+          (setq key (strcat (strcase tag) "|" (strcase val))
+                hit (assoc key out))
+          (if hit
+            (setq out (subst (list key tag val (1+ (nth 3 hit))) hit out))
+            (setq out (cons (list key tag val 1) out)))))))
+  (setq out (mapcar '(lambda (r) (list (nth 1 r) (nth 2 r) (nth 3 r))) out))
+  (vl-sort out '(lambda (a b)
+                  (if (= (mk:nat-key (nth 0 a)) (mk:nat-key (nth 0 b)))
+                    (< (mk:nat-key (nth 1 a)) (mk:nat-key (nth 1 b)))
+                    (< (mk:nat-key (nth 0 a)) (mk:nat-key (nth 0 b)))))))
+
+;;;--- Таблица комплектующих в чертеже ----------------------------------
+(defun mk:acc-table-create (data pt / doc space tbl nRows row n-row i hdr
+                                 total-cnt old-echo)
+  (if (null data)
+    nil
+    (progn
+      (setq doc      (vla-get-ActiveDocument (vlax-get-acad-object))
+            space    (vla-get-ModelSpace doc)
+            nRows    (+ 3 (length data))
+            old-echo (getvar "CMDECHO"))
+      (vl-catch-all-apply 'setvar (list "CMDECHO" 0))
+      (mk:ensure-layer *mk:layer-table* 7)
+      (setq tbl (vl-catch-all-apply 'vla-AddTable
+                  (list space (vlax-3d-point pt) nRows 4 10.0 35.0)))
+      (if (vl-catch-all-error-p tbl)
+        (progn
+          (prompt (strcat "\n  [ERROR] AddTable: " (vl-catch-all-error-message tbl)))
+          (vl-catch-all-apply 'setvar (list "CMDECHO" old-echo))
+          nil)
+        (progn
+          (vl-catch-all-apply 'vla-put-Layer (list tbl *mk:layer-table*))
+          (vl-catch-all-apply 'vla-SetColumnWidth (list tbl 0 14.0))
+          (vl-catch-all-apply 'vla-SetColumnWidth (list tbl 1 60.0))
+          (vl-catch-all-apply 'vla-SetColumnWidth (list tbl 2 60.0))
+          (vl-catch-all-apply 'vla-SetColumnWidth (list tbl 3 32.0))
+          (mk:tab-set tbl 0 0 *mk:acc-title*)
+          (vl-catch-all-apply 'vla-SetRowHeight (list tbl 0 8.0))
+          (setq i 0)
+          (foreach hdr '("№" "Наименование" "Артикул / значение" "Кол-во, шт.")
+            (mk:tab-set tbl 1 i hdr)
+            (mk:tab-align tbl 1 i 5)
+            (setq i (1+ i)))
+          (vl-catch-all-apply 'vla-SetRowHeight (list tbl 1 8.0))
+          (setq row 2 n-row 1 total-cnt 0)
+          (foreach rec data
+            (mk:tab-set tbl row 0 (itoa n-row))
+            (mk:tab-set tbl row 1 (nth 0 rec))
+            (mk:tab-set tbl row 2 (nth 1 rec))
+            (mk:tab-set tbl row 3 (itoa (nth 2 rec)))
+            (mk:tab-align tbl row 0 5)
+            (mk:tab-align tbl row 1 4)
+            (mk:tab-align tbl row 2 4)
+            (mk:tab-align tbl row 3 5)
+            (vl-catch-all-apply 'vla-SetRowHeight (list tbl row 8.0))
+            (setq total-cnt (+ total-cnt (nth 2 rec))
+                  row (1+ row) n-row (1+ n-row)))
+          (mk:tab-set tbl row 0 "")
+          (mk:tab-set tbl row 1 "   {\\LИтого:}")
+          (mk:tab-set tbl row 3 (itoa total-cnt))
+          (mk:tab-align tbl row 1 4)
+          (mk:tab-align tbl row 3 5)
+          (vl-catch-all-apply 'vla-SetRowHeight (list tbl row 8.0))
+          (vl-catch-all-apply 'vla-Update (list tbl))
+          (vl-catch-all-apply 'setvar (list "CMDECHO" old-echo))
+          (prompt (strcat "\n  [OK] Таблица комплектующих, строк: " (itoa (length data))))
+          tbl)))))
+
+;;;--- Комплектующие в XLS (дополнительный лист) ------------------------
+(defun mk:acc-xls (data f / n total hdr)
+  (if data
+    (progn
+      (write-line " <Worksheet ss:Name=\"Комплектующие\">" f)
+      (write-line "  <Table>" f)
+      (foreach hdr '("30" "180" "180" "80")
+        (write-line (strcat "   <Column ss:Width=\"" hdr "\"/>") f))
+      (write-line (strcat "   <Row><Cell ss:StyleID=\"TITLE\" ss:MergeAcross=\"3\">"
+                          "<Data ss:Type=\"String\">" (mk:xml-esc *mk:acc-title*)
+                          "</Data></Cell></Row>") f)
+      (write-line "   <Row>" f)
+      (foreach hdr '("№" "Наименование" "Артикул / значение" "Кол-во, шт.")
+        (mk:xcell f "H" nil "String" hdr))
+      (write-line "   </Row>" f)
+      (setq n 0 total 0)
+      (foreach rec data
+        (setq n (1+ n) total (+ total (nth 2 rec)))
+        (write-line "   <Row>" f)
+        (mk:xcell f "D" nil "Number" (itoa n))
+        (mk:xcell f "D" nil "String" (nth 0 rec))
+        (mk:xcell f "D" nil "String" (nth 1 rec))
+        (mk:xcell f "D" nil "Number" (itoa (nth 2 rec)))
+        (write-line "   </Row>" f))
+      (write-line "   <Row>" f)
+      (mk:xcell f "SU" nil "String" "")
+      (mk:xcell-m f "SU" 1 "String" "   Итого:")
+      (mk:xcell f "SN" nil "Number" (itoa total))
+      (write-line "   </Row>" f)
+      (write-line "  </Table>" f)
+      (write-line " </Worksheet>" f)))
+  (length data))
+
 ;;;--- Команда -----------------------------------------------------------
 (defun c:МАРКАВТАБЛ (/ ss data posts beams rows agg do-tbl do-xls file doc
-                       prefix bounds)
+                       prefix bounds acc res pt2 h)
   (prompt "\n[МАРКАВТАБЛ] Ведомость профилей (стойки + ригели)...")
   (setq *mk:dyn-cache* nil)
   ;; вопрос о припуске задаётся один раз за прогон
@@ -3522,6 +3702,11 @@
       (setq rows (mk:tab-rows posts beams)
             agg  (mk:tab-aggregate rows))
       (prompt (strcat "\n  Уникальных позиций: " (itoa (length agg))))
+      ;; комплектующие: атрибуты «Пятка*» / «Кронштейн*» у блоков
+      (setq acc (mk:acc-rows (append posts beams)))
+      (if acc
+        (prompt (strcat "\n  Комплектующих (позиций): " (itoa (length acc))))
+        (prompt "\n  Комплектующие (Пятка/Кронштейн) не найдены."))
       (initget "Да Нет")
       (setq do-tbl (getkword "\nТаблица в чертеже? [Да/Нет] <Да>: "))
       (setq do-tbl (if (= do-tbl "Нет") nil t))
@@ -3534,8 +3719,19 @@
           (setq file (strcat (getvar "dwgprefix")
                              (vl-filename-base (getvar "dwgname"))
                              " Профили Марки.xls"))
-          (mk:tab-xls agg file)))
-      (if do-tbl (mk:tab-create agg))
+          (mk:tab-xls agg file acc)))
+      (if do-tbl
+        (progn
+          (setq res (mk:tab-create agg))
+          ;; вторая таблица — комплектующие, под ведомостью профилей
+          (if (and res acc)
+            (progn
+              (setq h (vl-catch-all-apply 'vlax-get-property (list (car res) 'Height)))
+              (if (vl-catch-all-error-p h) (setq h (* 12.0 (+ 3 (length agg)))))
+              (setq pt2 (list (car (cadr res))
+                              (- (cadr (cadr res)) h *mk:acc-gap*)
+                              0.0))
+              (mk:acc-table-create acc pt2)))))
       (mk:undo-end doc)
       (prompt "\n[ГОТОВО] Ведомость сформирована.")))
   (princ))
