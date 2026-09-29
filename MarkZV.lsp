@@ -3451,6 +3451,8 @@
                        prefix bounds)
   (prompt "\n[МАРКАВТАБЛ] Ведомость профилей (стойки + ригели)...")
   (setq *mk:dyn-cache* nil)
+  ;; вопрос о припуске задаётся один раз за прогон
+  (if (null *mk:batch*) (setq *mk:allowance-unknown* nil))
   (setq ss   (mk:scope-ss))
   (setq data (mk:collect-scope ss))
   (setq posts (cdr (assoc 'POSTS data))
@@ -3531,7 +3533,7 @@
   (prompt (strcat "\n[МАРКАВ] Пакетный прогон, Ред. " *mk:ver* "."))
   (prompt "\n  Этапы: сбор и сетка -> марки стоек -> марки ригелей -> ведомость.")
   (setq *mk:batch* nil *mk:batch-ss* nil *mk:batch-mode* nil)
-  (setq *mk:dyn-cache* nil)
+  (setq *mk:dyn-cache* nil *mk:allowance-unknown* nil)
   (prompt "\nВыберите элементы витража (рамкой): ")
   (setq ss (ssget))
   (if (null ss)
