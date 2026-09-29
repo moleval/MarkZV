@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.7")
+(setq *mk:ver*            "3.8")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -617,26 +617,105 @@
 ;;;=====================================================================
 ;;; 7. ЧТЕНИЕ БЛОКА «АТРИБУТЫ ВИТРАЖА»
 ;;;=====================================================================
-(defun mk:read-vitrage-block (/ ss i e attrs vitrage-data)
-  (setq vitrage-data nil)
-  (setq ss (ssget "_X" (list (cons 0 "INSERT"))))
+(setq *mk:vitrage-src*   "")    ; откуда взят блок: выборка / чертёж
+(setq *mk:vitrage-cache* nil)   ; кэш блока на время одной команды
+
+;; Все вставки «Атрибуты витража» набора; ss = nil -> весь чертёж
+(defun mk:vitrage-blocks (ss / i e out)
+  (setq out nil)
+  (if (null ss) (setq ss (ssget "_X" (list (cons 0 "INSERT")))))
   (if ss
     (progn
       (setq i 0)
       (repeat (sslength ss)
         (setq e (ssname ss i))
-        (if (mk:blk-match? e (strcat "*" *mk:block-vitrage* "*"))
-          (progn
-            (setq attrs (mk:get-all-attrs e))
-            (setq vitrage-data
-              (list
-                (cons 'TYPE "АТРИБУТЫ_ВИТРАЖА")
-                (cons 'ENAME e)
-                (cons 'INS_PT (cdr (assoc 'INS_PT (mk:get-geom
-                  (vlax-ename->vla-object e)))))
-                (cons 'ATTRS attrs)))))
+        (if (and (= (cdr (assoc 0 (entget e))) "INSERT")
+                 (mk:blk-match? e (strcat "*" *mk:block-vitrage* "*")))
+          (setq out (cons e out)))
         (setq i (1+ i)))))
-  vitrage-data)
+  (reverse out))
+
+;; Запись блока атрибутов витража по ename
+(defun mk:vitrage-rec (e)
+  (if (null e)
+    nil
+    (list
+      (cons 'TYPE "АТРИБУТЫ_ВИТРАЖА")
+      (cons 'ENAME e)
+      (cons 'INS_PT (cdr (assoc 'INS_PT (mk:get-geom (vlax-ename->vla-object e)))))
+      (cons 'ATTRS (mk:get-all-attrs e)))))
+
+;; Центр габарита выборки (для выбора ближайшего блока атрибутов)
+(defun mk:ss-center (ss / i e bb x0 y0 x1 y1 obj)
+  (setq x0 nil)
+  (if ss
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (setq e   (ssname ss i)
+              obj (vl-catch-all-apply 'vlax-ename->vla-object (list e))
+              bb  (if (vl-catch-all-error-p obj) nil (mk:e-bb obj)))
+        (if bb
+          (if (null x0)
+            (setq x0 (nth 0 bb) y0 (nth 1 bb) x1 (nth 2 bb) y1 (nth 3 bb))
+            (setq x0 (min x0 (nth 0 bb)) y0 (min y0 (nth 1 bb))
+                  x1 (max x1 (nth 2 bb)) y1 (max y1 (nth 3 bb)))))
+        (setq i (1+ i)))))
+  (if x0 (list (/ (+ x0 x1) 2.0) (/ (+ y0 y1) 2.0)) nil))
+
+;; Ближайшая к точке вставка из списка
+(defun mk:nearest-insert (lst pt / best bd p d)
+  (setq best nil bd nil)
+  (foreach e lst
+    (setq p (cdr (assoc 10 (entget e))))
+    (if (and p pt)
+      (progn
+        (setq d (distance (list (car p) (cadr p)) (list (car pt) (cadr pt))))
+        (if (or (null bd) (< d bd)) (setq bd d best e)))
+      (if (null best) (setq best e))))
+  (if best best (car lst)))
+
+;; Блок «Атрибуты витража»: сначала в текущей выборке, затем по чертежу.
+;; На чертеже с несколькими витражами это не даёт взять чужой префикс.
+(defun mk:read-vitrage-block-scan (/ ss n lst pt e)
+  (setq ss (if *mk:last-ss*
+             (if (vl-catch-all-error-p
+                   (setq n (vl-catch-all-apply 'sslength (list *mk:last-ss*))))
+               nil *mk:last-ss*)
+             nil))
+  (setq lst (if ss (mk:vitrage-blocks ss) nil))
+  (setq pt  (if ss (mk:ss-center ss) nil))
+  (cond
+    ((= (length lst) 1)
+     (setq *mk:vitrage-src* "выборка")
+     (setq e (car lst)))
+    ((> (length lst) 1)
+     (setq *mk:vitrage-src* "выборка, ближайший")
+     (prompt (strcat "\n  [WARN] В выборке блоков «" *mk:block-vitrage* "»: "
+                     (itoa (length lst)) " — взят ближайший к центру выборки."))
+     (setq e (mk:nearest-insert lst pt)))
+    (t
+     (setq lst (mk:vitrage-blocks nil))
+     (cond
+       ((null lst) (setq *mk:vitrage-src* "не найден") (setq e nil))
+       ((= (length lst) 1)
+        (setq *mk:vitrage-src* "чертёж")
+        (prompt (strcat "\n  [WARN] Блок «" *mk:block-vitrage*
+                        "» в выборку не попал — взят единственный в чертеже."))
+        (setq e (car lst)))
+       (t
+        (setq *mk:vitrage-src* "чертёж, ближайший")
+        (prompt (strcat "\n  [WARN] Блок «" *mk:block-vitrage*
+                        "» в выборку не попал; в чертеже их " (itoa (length lst))
+                        " — взят ближайший к выборке. Включите нужный блок в рамку!"))
+        (setq e (mk:nearest-insert lst pt))))))
+  (mk:vitrage-rec e))
+
+;; Кэш на время команды: сбрасывается вместе с *mk:dyn-cache*
+(defun mk:read-vitrage-block ()
+  (if (null *mk:vitrage-cache*)
+    (setq *mk:vitrage-cache* (list (mk:read-vitrage-block-scan))))
+  (car *mk:vitrage-cache*))
 
 (defun mk:get-vitrage-prefix (/ vitrage attrs prefix)
   (setq vitrage (mk:read-vitrage-block))
@@ -648,6 +727,9 @@
           (setq prefix (cdr attr))))
       (if (and (null prefix) attrs)
         (setq prefix (cdr (car attrs))))))
+  (if (null vitrage)
+    (prompt (strcat "\n  [WARN] Блок «" *mk:block-vitrage*
+                    "» не найден — префикс по умолчанию «В-1».")))
   (if (mk:strp prefix) prefix "В-1"))
 
 ;;;=====================================================================
@@ -2774,9 +2856,9 @@
 (defun c:МАРКАВСТ (/ ss data posts elements prefix plan res count skip-count
                      lab-count doc)
   (prompt "\n[МАРКАВСТ] Марки стоек...")
-  (setq *mk:dyn-cache* nil)
+  (setq *mk:dyn-cache* nil *mk:vitrage-cache* nil)
   (setq prefix (mk:get-vitrage-prefix))
-  (prompt (strcat "\n  Префикс витража: " prefix))
+  (prompt (strcat "\n  Префикс витража: " prefix " (" *mk:vitrage-src* ")"))
   (setq ss   (mk:scope-ss))
   (setq data (mk:collect-scope ss))
   (setq posts (cdr (assoc 'POSTS data)))
@@ -2814,10 +2896,10 @@
 (defun c:МАРКАВРГ (/ ss data beams posts panels doors bounds prefix plan
                      res count skip-count lab-count doc)
   (prompt "\n[МАРКАВРГ] Марки ригелей...")
-  (setq *mk:dyn-cache* nil)
+  (setq *mk:dyn-cache* nil *mk:vitrage-cache* nil)
   (if (null *mk:batch*) (setq *mk:allowance-unknown* nil))
   (setq prefix (mk:get-vitrage-prefix))
-  (prompt (strcat "\n  Префикс витража: " prefix))
+  (prompt (strcat "\n  Префикс витража: " prefix " (" *mk:vitrage-src* ")"))
   (setq ss   (mk:scope-ss))
   (setq data (mk:collect-scope ss))
   (setq beams  (cdr (assoc 'BEAMS data))
@@ -2862,7 +2944,7 @@
                       out-count post-result protruding-count mlines
                       mline-result use-mlines mode-kw post-enames beam-enames)
   (prompt "\n[МАРКАВГЕОМЕТРИЯ] Сбор данных и построение 2D модели витража...")
-  (setq *mk:dyn-cache* nil)
+  (setq *mk:dyn-cache* nil *mk:vitrage-cache* nil)
   (if (and *mk:batch* *mk:batch-ss*)
     (progn
       (setq ss *mk:batch-ss*)
@@ -2880,7 +2962,8 @@
   (if vitrage
     (progn
       (setq vitrage-pt (cdr (assoc 'INS_PT vitrage)))
-      (prompt "\n  Найдено блоков атрибутов витража: 1"))
+      (prompt (strcat "\n  Блок атрибутов витража найден (" *mk:vitrage-src*
+                      "), Витраж: " (mk:get-vitrage-prefix))))
     (prompt "\n  [WARN] Блок Атрибуты витража не найден!"))
   (prompt "\n[2/8] Поиск элементов каркаса в выборке...")
   (setq mlines (mk:find-mlines-in-ss ss))
@@ -3055,7 +3138,7 @@
     (prompt "\n  [INFO] Блок не указан.")
     (progn
       (setq ename (car sel))
-      (setq *mk:dyn-cache* nil)
+      (setq *mk:dyn-cache* nil *mk:vitrage-cache* nil)
       (setq lines (mk:diag-block ename))
       (prompt "\n---------------------------------------------")
       (foreach l lines (prompt (strcat "\n" l)))
@@ -3931,7 +4014,7 @@
 (defun c:МАРКАВТАБЛ (/ ss data posts beams rows agg do-tbl do-xls file doc
                        prefix bounds acc res pt2 pt3 h h2 tbl2)
   (prompt "\n[МАРКАВТАБЛ] Ведомость профилей (стойки + ригели)...")
-  (setq *mk:dyn-cache* nil)
+  (setq *mk:dyn-cache* nil *mk:vitrage-cache* nil)
   ;; вопрос о припуске задаётся один раз за прогон
   (if (null *mk:batch*) (setq *mk:allowance-unknown* nil))
   (setq ss   (mk:scope-ss))
@@ -4043,7 +4126,7 @@
   (prompt (strcat "\n[МАРКАВ] Пакетный прогон, Ред. " *mk:ver* "."))
   (prompt "\n  Этапы: сбор и сетка -> марки стоек -> марки ригелей -> ведомость.")
   (setq *mk:batch* nil *mk:batch-ss* nil *mk:batch-mode* nil)
-  (setq *mk:dyn-cache* nil *mk:allowance-unknown* nil)
+  (setq *mk:dyn-cache* nil *mk:vitrage-cache* nil *mk:allowance-unknown* nil)
   (prompt "\nВыберите элементы витража (рамкой): ")
   (setq ss (ssget))
   (if (null ss)
