@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.2")
+(setq *mk:ver*            "3.3")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -2253,12 +2253,15 @@
     (setq i (1+ i)))
   idx)
 
+;; Пары «артикул -> габарит». Элементы без артикула не участвуют:
+;; маркер м/б ставится только там, где артикул известен.
 (defun mk:article-cross-pairs (elements / out art cross)
   (setq out nil)
   (foreach el elements
-    (setq art   (if (mk:rec-get el 'ARTICLE) (mk:rec-get el 'ARTICLE) "БЕЗ_АРТИКУЛА")
+    (setq art   (mk:rec-get el 'ARTICLE)
           cross (mk:cross-size el))
-    (if (null (assoc art out))
+    (if (and (mk:strp art) (> (strlen (mk:art-key art)) 0)
+             (null (assoc art out)))
       (setq out (cons (cons art cross) out))))
   (reverse out))
 
@@ -2277,12 +2280,14 @@
           (setq out (list (cons (car (car sorted))  *mk:suffix-small*)
                           (cons (car (last sorted)) *mk:suffix-big*)))
           (if (> (length pairs) 2)
-            (prompt (strcat "\n  [WARN] Артикулов ригелей: " (itoa (length pairs))
-                            " — маркеры м/б присвоены только крайним по габариту.")))))))
+            (prompt (strcat "\n  [INFO] Артикулов ригелей: " (itoa (length pairs))
+                            " — м у наименьшего, б у наибольшего, остальные без маркера.")))))))
   out)
 
 (defun mk:size-mark (art table)
   (cond
+    ((or (not (mk:strp art)) (= art "БЕЗ_АРТИКУЛА")
+         (= (strlen (mk:art-key art)) 0)) "")
     ((cdr (assoc art *mk:article-size*)) (cdr (assoc art *mk:article-size*)))
     ((cdr (assoc art table))             (cdr (assoc art table)))
     (t "")))
@@ -2343,13 +2348,17 @@
                                        (nth 1 *mk:mirror-suffixes*)) mirror) plan)))
       (setq plan (cons (list (strcat prefix " Ст" (itoa idx)) base) plan)))
     (setq idx (1+ idx)))
-  (reverse plan))
+  (mk:sort-plan (reverse plan)))
 
 
 ;; Ригели: цифра марки = индекс длины ригеля в шкале размеров «в свету»
 ;; (от минимальной к максимальной) — та же цифра, что у заполнения в MarkZ
 ;; ("номер = ширина"). Далее маркер размера профиля (м/б) и суффикс окружения.
-(defun mk:plan-beams (beams prefix / plan idxs idx grp k sub mark base used n)
+;; План марок по возрастанию номера: Рг1, Рг2 … Рг9, Рг10 (натуральный ключ)
+(defun mk:sort-plan (plan)
+  (vl-sort plan '(lambda (a b) (< (mk:nat-key (car a)) (mk:nat-key (car b))))))
+
+(defun mk:plan-beams (beams prefix / plan idxs idx grp k sub mark hit)
   (setq beams (mk:sort-xy beams) plan nil used nil)
   (setq idxs (vl-sort (mk:unique-keys beams 'LEN_IDX) '<))
   (if (member 0 idxs)
@@ -2366,17 +2375,12 @@
                            (mk:rec-get (car sub) 'SIZE_MARK) "")
                          (if (mk:rec-get (car sub) 'SUFFIX)
                            (mk:rec-get (car sub) 'SUFFIX) "")))
-      ;; защита от совпадения марок разных групп
-      (if (member mark used)
-        (progn
-          (setq base mark n 2)
-          (while (member (strcat base "*" (itoa n)) used) (setq n (1+ n)))
-          (setq mark (strcat base "*" (itoa n)))
-          (prompt (strcat "\n  [WARN] Длина №" (itoa idx)
-                          ": разные группы дают одну марку — выдана " mark))))
-      (setq used (cons mark used))
-      (setq plan (cons (list mark sub) plan))))
-  (reverse plan))
+      ;; одинаковая марка разных групп -> это одна позиция, элементы сливаются
+      (setq hit (assoc mark plan))
+      (if hit
+        (setq plan (subst (list mark (append (cadr hit) sub)) hit plan))
+        (setq plan (cons (list mark sub) plan)))))
+  (mk:sort-plan (reverse plan)))
 
 ;;;---------------------------------------------------------------------
 ;;; 18e. ОБЛАСТЬ ДЕЙСТВИЯ, UNDO, ЗАПИСЬ
@@ -2750,6 +2754,7 @@
                      res count skip-count lab-count doc)
   (prompt "\n[МАРКАВРГ] Марки ригелей...")
   (setq *mk:dyn-cache* nil)
+  (if (null *mk:batch*) (setq *mk:allowance-unknown* nil))
   (setq prefix (mk:get-vitrage-prefix))
   (prompt (strcat "\n  Префикс витража: " prefix))
   (setq ss   (mk:scope-ss))
@@ -2763,6 +2768,7 @@
     (progn
       (prompt (strcat "\n  Ригелей: " (itoa (length beams))
                       ", панелей: " (itoa (length panels))))
+      (mk:ask-unknown-allowance beams)      ; чтобы L=… уже содержал припуск
       (setq bounds (mk:find-vitrage-bounds posts beams))
       (setq beams  (mk:annotate-beams beams panels doors bounds posts))
       (setq plan   (mk:plan-beams beams prefix))
@@ -3159,12 +3165,13 @@
     ((< (nth 0 a) (nth 0 b)) t)
     ((> (nth 0 a) (nth 0 b)) nil)
     (t
-     (setq aa (mk:nat-key (nth 2 a)) ab (mk:nat-key (nth 2 b)))
+     ;; сначала по марке, затем по артикулу
+     (setq aa (mk:nat-key (nth 3 a)) ab (mk:nat-key (nth 3 b)))
      (cond
        ((< aa ab) t)
        ((> aa ab) nil)
        (t
-        (setq ma (mk:nat-key (nth 3 a)) mb (mk:nat-key (nth 3 b)))
+        (setq ma (mk:nat-key (nth 2 a)) mb (mk:nat-key (nth 2 b)))
         (cond
           ((< ma mb) t)
           ((> ma mb) nil)
@@ -3259,7 +3266,7 @@
                 (if (and cur (/= sect cur))
                   (progn
                     (mk:tab-set tbl row 0 "")
-                    (mk:tab-set tbl row 1 (strcat "   " cur))
+                    (mk:tab-set tbl row 1 (strcat "   {\\L" cur "}"))
                     (mk:tab-merge tbl row)
                     (mk:tab-align tbl row 1 4)
                     (mk:tab-set tbl row 4 (itoa cnt-sub))
@@ -3290,7 +3297,7 @@
               (if cur
                 (progn
                   (mk:tab-set tbl row 0 "")
-                  (mk:tab-set tbl row 1 (strcat "   " cur))
+                  (mk:tab-set tbl row 1 (strcat "   {\\L" cur "}"))
                   (mk:tab-merge tbl row)
                   (mk:tab-align tbl row 1 4)
                   (mk:tab-set tbl row 4 (itoa cnt-sub))
@@ -3368,8 +3375,14 @@
       (strcat "=SUM(" out ")"))))
 
 (defun mk:xstyle (f id bold fill align / )
+  (mk:xstyle2 f id bold fill align nil))
+
+(defun mk:xstyle2 (f id bold fill align uline / )
   (write-line (strcat "  <Style ss:ID=\"" id "\">") f)
-  (if bold  (write-line "   <Font ss:Bold=\"1\"/>" f))
+  (if (or bold uline)
+    (write-line (strcat "   <Font"
+                        (if bold " ss:Bold=\"1\"" "")
+                        (if uline " ss:Underline=\"Single\"" "") "/>") f))
   (if fill  (write-line "   <Interior ss:Color=\"#D9D9D9\" ss:Pattern=\"Solid\"/>" f))
   (if align (write-line (strcat "   <Alignment ss:Horizontal=\"" align "\"/>") f))
   (write-line "   <Borders>" f)
@@ -3402,6 +3415,7 @@
       (mk:xstyle f "TITLE" t   t   "Center")
       (mk:xstyle f "S"     t   t   "Left")
       (mk:xstyle f "SN"    t   t   "Right")
+      (mk:xstyle2 f "SU" t t "Left" t)
       (write-line " </Styles>" f)
       (write-line " <Worksheet ss:Name=\"Профили\">" f)
       (write-line "  <Table>" f)
@@ -3427,7 +3441,7 @@
           (progn
             (write-line "   <Row>" f)
             (mk:xcell f "S" nil "String" "")
-            (mk:xcell-m f "S" 2 "String" (strcat "   " cur))
+            (mk:xcell-m f "SU" 2 "String" (strcat "   " cur))
             (mk:xcell f "SN" (mk:xsum grp-start (1- xl-row)) "Number" (itoa cnt-sub))
             (mk:xcell f "SN" (mk:xsum grp-start (1- xl-row)) "Number" (mk:tab-xnum mp-sub))
             (write-line "   </Row>" f)
@@ -3454,7 +3468,7 @@
         (progn
           (write-line "   <Row>" f)
           (mk:xcell f "S" nil "String" "")
-          (mk:xcell-m f "S" 2 "String" (strcat "   " cur))
+          (mk:xcell-m f "SU" 2 "String" (strcat "   " cur))
           (mk:xcell f "SN" (mk:xsum grp-start (1- xl-row)) "Number" (itoa cnt-sub))
           (mk:xcell f "SN" (mk:xsum grp-start (1- xl-row)) "Number" (mk:tab-xnum mp-sub))
           (write-line "   </Row>" f)
