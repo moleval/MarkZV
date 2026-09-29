@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.6")
+(setq *mk:ver*            "3.7")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -2211,25 +2211,41 @@
 ;; Шкала размеров «в свету»: уникальные длины ригелей и ширины заполнений,
 ;; по возрастанию. Индекс в этой шкале и есть цифра марки ригеля —
 ;; так она совпадает с цифрой марки заполнения (в MarkZ: номер = ширина).
-(defun mk:length-scale (beams panels / vals v out)
-  (setq vals nil)
+(defun mk:length-scale (beams panels / bvals pvals out extra v)
+  ;; Блок 1 — длины горизонтальных ригелей «в свету» (приоритет за ригелями).
+  ;; Вертикальные ригели («т») нумеруются отдельно, после всех обычных.
+  (setq bvals nil)
   (foreach b beams
     (setq v (mk:rec-get b 'LENGTH))
-    ;; вертикальные ригели («т») нумеруются отдельно, после всех обычных,
-    ;; чтобы не сдвигать соответствие номеров с заполнениями
     (if (and (numberp v) (null (mk:rec-get b 'VERT)))
-      (setq vals (cons (atof (mk:size-key v)) vals))))
+      (setq bvals (cons (atof (mk:size-key v)) bvals))))
+  (setq out nil)
+  (foreach v (vl-sort bvals '<)
+    (if (not (member v out)) (setq out (cons v out))))
+  (setq out (reverse out))
+  ;; Блок 2 — ширины заполнений, которым не нашлось ригеля такой же длины
+  ;; (сплошное заполнение над Т-соединением). Они получают номера ПОСЛЕ
+  ;; всех «ригельных» размеров и не сдвигают нумерацию ригелей.
+  (setq pvals nil)
   (foreach pn panels
     (if (= (mk:rec-get pn 'TYPE) "ЗАПОЛНЕНИЕ")
       (progn
         (setq v (mk:rec-get pn 'WIDTH))
-        (if (numberp v) (setq vals (cons (atof (mk:size-key v)) vals))))))
-  (setq out nil)
-  (foreach v (vl-sort vals '<)
-    (if (not (member v out)) (setq out (cons v out))))
-  (reverse out))
+        (if (and (numberp v) (= 0 (mk:scale-index (atof (mk:size-key v)) out)))
+          (setq pvals (cons (atof (mk:size-key v)) pvals))))))
+  (setq extra nil)
+  (foreach v (vl-sort pvals '<)
+    (if (and (not (member v extra)) (= 0 (mk:scale-index v out)))
+      (setq extra (cons v extra))))
+  (setq extra (reverse extra))
+  (if extra
+    (prompt (strcat "\n  [INFO] Шкала размеров в свету: ригельных "
+                    (itoa (length out)) ", только у заполнений "
+                    (itoa (length extra))
+                    " (номера " (itoa (1+ (length out))) "…"
+                    (itoa (+ (length out) (length extra))) ")")))
+  (append out extra))
 
-;; Шкала длин вертикальных ригелей (только они, по возрастанию)
 (defun mk:vert-scale (beams / vals v out)
   (setq vals nil)
   (foreach b beams
@@ -3736,7 +3752,7 @@
   (list (cons *mk:suffix-window-one*   "примыкание окна")
         (cons *mk:suffix-window-both*  "окна сверху и снизу")
         (cons *mk:suffix-door-one*     "примыкание двери")
-        (cons *mk:suffix-threshold*    "порог двери")
+        (cons *mk:suffix-threshold*    "накладной ригель")
         (cons *mk:suffix-warm-cold*    "переход тепло-холод")
         (cons *mk:suffix-cold-warm*    "переход холод-тепло")
         (cons *mk:suffix-vert-beam*    "вертикальный ригель (импост)")
