@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "2.9")
+(setq *mk:ver*            "3.0")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -159,6 +159,10 @@
 ;;; встречающиеся только на листе «База СИАЛ КП50К»).
 (setq *mk:beam-allowance*       0.0)    ; по умолчанию (КП50 / артикул неизвестен)
 (setq *mk:allowance-kp50k*      25.0)   ; КП50К
+;; Припуск для ригелей с нераспознанным артикулом (неименованные мультилинии).
+;; nil — спросить один раз за прогон; число — использовать молча.
+(setq *mk:allowance-unknown*    nil)
+(setq *mk:ask-unknown-allowance* t)     ; задавать ли вопрос
 ;; Припуск по артикулу профиля: ((маска . припуск) ...), маска — wcmatch,
 ;; ВЕРХНИЙ регистр. Проверяется раньше значения по умолчанию.
 ;; Пример для разных систем:
@@ -3013,8 +3017,40 @@
         (if (and (null out) (wcmatch k (strcase (car pair))))
           (setq out (cdr pair))))
       (if (and (null out) (member k *mk:articles-kp50k*))
-        (setq out *mk:allowance-kp50k*))))
+        (setq out *mk:allowance-kp50k*)))
+    ;; артикул не распознан — общий припуск, заданный вопросом
+    (if (numberp *mk:allowance-unknown*)
+      (setq out *mk:allowance-unknown*)))
   (if (numberp out) out *mk:beam-allowance*))
+
+;; Сколько ригелей без артикула (вертикальные не в счёт — у них припуск 0)
+(defun mk:beams-wo-article (beams / n a)
+  (setq n 0)
+  (foreach b beams
+    (setq a (mk:rec-get b 'ARTICLE))
+    (if (and (null (mk:rec-get b 'VERT))
+             (or (not (mk:strp a)) (= (strlen (mk:art-key a)) 0)))
+      (setq n (1+ n))))
+  n)
+
+;; Вопрос «оптом»: припуск для ригелей с нераспознанным артикулом
+(defun mk:ask-unknown-allowance (beams / n ans v)
+  (setq n (mk:beams-wo-article beams))
+  (if (and (> n 0) *mk:ask-unknown-allowance* (null *mk:allowance-unknown*))
+    (progn
+      (prompt (strcat "\n  Ригелей с нераспознанным артикулом: " (itoa n)))
+      (initget "КП50 КП50К Ввод")
+      (setq ans (getkword "\n  Припуск для них [КП50/КП50К/Ввод] <КП50>: "))
+      (cond
+        ((= ans "КП50К") (setq *mk:allowance-unknown* *mk:allowance-kp50k*))
+        ((= ans "Ввод")
+         (initget 4)
+         (setq v (getreal "\n  Припуск на элемент, мм <0>: "))
+         (setq *mk:allowance-unknown* (if (numberp v) v 0.0)))
+        (t (setq *mk:allowance-unknown* 0.0)))
+      (prompt (strcat "\n  Принято: +" (rtos *mk:allowance-unknown* 2 1)
+                      " мм к " (itoa n) " ригел(ю/ям) без артикула."))))
+  (if (numberp *mk:allowance-unknown*) *mk:allowance-unknown* 0.0))
 
 ;; Длина профиля ригеля = нарисованный размер + припуск
 (defun mk:beam-cut-len (len)
@@ -3424,6 +3460,7 @@
     (progn
       (prompt (strcat "\n  Стоек: " (itoa (length posts))
                       ", ригелей: " (itoa (length beams))))
+      (mk:ask-unknown-allowance beams)
       ;; расчётные марки — для элементов, у которых нет атрибута «Марка»
       (setq *mk:mark-map* nil)
       (setq prefix (mk:get-vitrage-prefix))
