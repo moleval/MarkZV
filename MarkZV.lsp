@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.5")
+(setq *mk:ver*            "3.6")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -145,6 +145,7 @@
 (setq *mk:conn-none*            "ПРИМЫКАНИЕ")  ; сторона без элементов каркаса
 (setq *mk:suffix-small*         "м")     ; малый профиль
 (setq *mk:suffix-big*           "б")     ; большой профиль
+(setq *mk:suffix-mid*           "ср")    ; средний профиль (при 4 и более артикулах)
 ;; Ручная таблица артикул -> "м"/"б" (приоритет над автоопределением по габариту).
 ;; Заполняется из базы СИАЛ: (("КП45551" . "м") ("КП45364" . "б"))
 (setq *mk:article-size*         nil)
@@ -2279,29 +2280,46 @@
       (setq out (cons (cons art cross) out))))
   (reverse out))
 
-;; Таблица артикул -> "м"/"б": по габариту сечения (минимальный/максимальный).
-;; Если артикул один — таблица пустая (маркер не нужен).
-(defun mk:size-mark-table (elements / pairs sorted out i)
+;; Лестница маркеров размера профиля (по возрастанию габарита сечения):
+;;   1 артикул  -> без маркера
+;;   2          -> м, б
+;;   3          -> м, «» (средний массовый), б
+;;   4          -> м, ср, «», б
+;;   5 и более  -> м, м2, м3 … ср, «», б
+(defun mk:size-labels (n / out i)
+  (cond
+    ((< n 2) (list ""))
+    ((= n 2) (list *mk:suffix-small* *mk:suffix-big*))
+    ((= n 3) (list *mk:suffix-small* "" *mk:suffix-big*))
+    ((= n 4) (list *mk:suffix-small* *mk:suffix-mid* "" *mk:suffix-big*))
+    (t
+     (setq out (list *mk:suffix-small*) i 2)
+     (repeat (- n 4)
+       (setq out (cons (strcat *mk:suffix-small* (itoa i)) out))
+       (setq i (1+ i)))
+     (append (reverse out) (list *mk:suffix-mid* "" *mk:suffix-big*)))))
+
+;; Таблица «артикул -> маркер» по габариту сечения.
+;; Артикул один — таблица пустая (маркер не нужен); средний массовый
+;; артикул маркера не получает.
+(defun mk:size-mark-table (elements / pairs sorted out labels info)
   (setq pairs (mk:article-cross-pairs elements) out nil)
   (if (> (length pairs) 1)
     (progn
       (setq sorted (vl-sort pairs '(lambda (a b) (< (cdr a) (cdr b)))))
-      (if (or (< (length sorted) 2)
-              (equal (cdr (car sorted)) (cdr (last sorted)) *mk:tol-size*))
+      (if (equal (cdr (car sorted)) (cdr (last sorted)) *mk:tol-size*)
         (prompt (strcat "\n  [WARN] Габариты сечений артикулов ригелей одинаковы"
-                        " — маркеры м/б не присвоены. Задайте *mk:article-size*."))
+                        " — маркеры размера не присвоены. Задайте *mk:article-size*."))
         (progn
-          ;; наименьший -> «м», наибольший -> «б», промежуточные -> «м2», «м3» …
-          (setq out (list (cons (car (car sorted))  *mk:suffix-small*)
-                          (cons (car (last sorted)) *mk:suffix-big*)))
-          (setq i 2)
-          (foreach pr (cdr (reverse (cdr (reverse sorted))))   ; без первого и последнего
-            (setq out (cons (cons (car pr)
-                                  (strcat *mk:suffix-small* (itoa i))) out))
-            (setq i (1+ i)))
-          (if (> (length pairs) 2)
-            (prompt (strcat "\n  [INFO] Артикулов ригелей: " (itoa (length pairs))
-                            " — м у наименьшего, б у наибольшего, промежуточные м2, м3 …")))))))
+          (setq labels (mk:size-labels (length sorted)) info "")
+          (foreach pr sorted
+            (if (> (strlen (car labels)) 0)
+              (setq out (cons (cons (car pr) (car labels)) out)))
+            (setq info (strcat (if (> (strlen (car labels)) 0) (car labels) "«»")
+                               (if (= (strlen info) 0) "" " < ") info))
+            (setq labels (cdr labels)))
+          (prompt (strcat "\n  [INFO] Артикулов ригелей: " (itoa (length pairs))
+                          " — маркеры по убыванию: " info))))))
   out)
 
 (defun mk:size-mark (art table)
@@ -3514,6 +3532,7 @@
       (write-line "  </Table>" f)
       (write-line " </Worksheet>" f)
       (mk:acc-xls acc f)
+      (mk:leg-xls *mk:leg-sfx* *mk:leg-arts* f)
       (write-line "</Workbook>" f)
       (close f)
       (prompt (strcat "\n  [OK] XLS: " file))
@@ -3701,9 +3720,200 @@
       (write-line " </Worksheet>" f)))
   (length data))
 
+;;;=====================================================================
+;;; 20d. УСЛОВНЫЕ ОБОЗНАЧЕНИЯ
+;;;   Расшифровка буквенных суффиксов марок и соответствие
+;;;   «маркер размера -> артикул». В список попадают только те
+;;;   обозначения, которые реально встретились в марках.
+;;;=====================================================================
+(setq *mk:leg-title*  "Условные обозначения")
+(setq *mk:leg-h1*     "Условные обозначения ригелей:")
+(setq *mk:leg-h2*     "Артикул профилей:")
+(setq *mk:leg-none*   "без обозначения")
+
+;; Расшифровка суффиксов: (обозначение . пояснение)
+(defun mk:leg-desc-table ()
+  (list (cons *mk:suffix-window-one*   "примыкание окна")
+        (cons *mk:suffix-window-both*  "окна сверху и снизу")
+        (cons *mk:suffix-door-one*     "примыкание двери")
+        (cons *mk:suffix-threshold*    "порог двери")
+        (cons *mk:suffix-warm-cold*    "переход тепло-холод")
+        (cons *mk:suffix-cold-warm*    "переход холод-тепло")
+        (cons *mk:suffix-vert-beam*    "вертикальный ригель (импост)")
+        (cons *mk:suffix-tjoint-lo*
+              "Т-соединение снизу (у стоек - левая из зеркальной пары)")
+        (cons *mk:suffix-tjoint-hi*
+              "Т-соединение сверху (у стоек - правая из зеркальной пары)")
+        (cons *mk:suffix-tjoint-both*  "Т-соединения снизу и сверху")))
+
+;; Хвост марки: всё после «Ст»/«Рг» и номера («Т-1 Рг9м2ок» -> «м2ок»)
+(defun mk:mark-tail (mark / s i n c out)
+  (setq out "")
+  (if (mk:strp mark)
+    (progn
+      (setq s (mk:trim mark) i (strlen s))
+      ;; обрезать по последнему пробелу
+      (while (and (> i 0) (not (= (substr s i 1) " ")))
+        (setq i (1- i)))
+      (setq s (substr s (1+ i)) n (strlen s) i 1)
+      ;; пропустить буквы обозначения типа (Ст / Рг)
+      (while (and (<= i n) (not (wcmatch (substr s i 1) "#")))
+        (setq i (1+ i)))
+      ;; пропустить номер
+      (while (and (<= i n) (wcmatch (substr s i 1) "#"))
+        (setq i (1+ i)))
+      (if (<= i n) (setq out (substr s i)))))
+  out)
+
+;; Суффиксы, встретившиеся в марках агрегата: ((обозначение . пояснение) ...)
+(defun mk:leg-suffixes (agg / tails out hit)
+  (setq tails nil out nil)
+  (foreach rec agg
+    (setq tails (cons (mk:mark-tail (nth 3 rec)) tails)))
+  (foreach pair (mk:leg-desc-table)
+    (if (and (> (strlen (car pair)) 0)
+             (progn (setq hit nil)
+                    (foreach t2 tails
+                      (if (vl-string-search (car pair) t2) (setq hit t)))
+                    hit))
+      (setq out (cons pair out))))
+  (reverse out))
+
+;; Соответствие «маркер -> артикул» по лестнице размеров (только с артикулом)
+(defun mk:leg-articles (elements / pairs sorted labels out)
+  (setq pairs (mk:article-cross-pairs elements) out nil)
+  (if pairs
+    (progn
+      (setq sorted (vl-sort pairs '(lambda (a b) (< (cdr a) (cdr b))))
+            labels (mk:size-labels (length sorted)))
+      (foreach pr sorted
+        (setq out (cons (cons (car labels) (car pr)) out))
+        (setq labels (cdr labels)))))     ; из возрастания -> убывание
+  out)
+
+;; Печать в командную строку
+(defun mk:leg-print (sfx arts)
+  (if sfx
+    (progn
+      (prompt (strcat "\n  " *mk:leg-h1*))
+      (foreach p sfx
+        (prompt (strcat "\n    " (mk:pad (car p) 6) " - " (cdr p))))))
+  (if arts
+    (progn
+      (prompt (strcat "\n  " *mk:leg-h2*))
+      (foreach p arts
+        (prompt (strcat "\n    "
+                        (mk:pad (if (> (strlen (car p)) 0) (car p) *mk:leg-none*) 16)
+                        " - " (cdr p))))))
+  nil)
+
+;;;--- Таблица обозначений в чертеже ------------------------------------
+(defun mk:leg-merge (tbl r)
+  (vl-catch-all-apply 'vlax-invoke-method (list tbl "MergeCells" r r 0 1)))
+
+(defun mk:leg-table-create (sfx arts pt / doc space tbl nRows row i hdr old-echo)
+  (if (and (null sfx) (null arts))
+    nil
+    (progn
+      (setq doc   (vla-get-ActiveDocument (vlax-get-acad-object))
+            space (vla-get-ModelSpace doc)
+            nRows (+ 1
+                     (if sfx  (1+ (length sfx))  0)
+                     (if arts (1+ (length arts)) 0))
+            old-echo (getvar "CMDECHO"))
+      (vl-catch-all-apply 'setvar (list "CMDECHO" 0))
+      (mk:ensure-layer *mk:layer-table* 7)
+      (setq tbl (vl-catch-all-apply 'vla-AddTable
+                  (list space (vlax-3d-point pt) nRows 2 10.0 40.0)))
+      (if (vl-catch-all-error-p tbl)
+        (progn
+          (prompt (strcat "\n  [ERROR] AddTable: " (vl-catch-all-error-message tbl)))
+          (vl-catch-all-apply 'setvar (list "CMDECHO" old-echo))
+          nil)
+        (progn
+          (vl-catch-all-apply 'vla-put-Layer (list tbl *mk:layer-table*))
+          (vl-catch-all-apply 'vla-SetColumnWidth (list tbl 0 40.0))
+          (vl-catch-all-apply 'vla-SetColumnWidth (list tbl 1 120.0))
+          (mk:tab-set tbl 0 0 *mk:leg-title*)
+          (vl-catch-all-apply 'vla-SetRowHeight (list tbl 0 8.0))
+          (setq row 1)
+          (if sfx
+            (progn
+              (mk:leg-merge tbl row)
+              (mk:tab-set tbl row 0 (strcat "   {\\L" *mk:leg-h1* "}"))
+              (mk:tab-align tbl row 0 4)
+              (vl-catch-all-apply 'vla-SetRowHeight (list tbl row 8.0))
+              (setq row (1+ row))
+              (foreach p sfx
+                (mk:tab-set tbl row 0 (car p))
+                (mk:tab-set tbl row 1 (cdr p))
+                (mk:tab-align tbl row 0 5)
+                (mk:tab-align tbl row 1 4)
+                (vl-catch-all-apply 'vla-SetRowHeight (list tbl row 8.0))
+                (setq row (1+ row)))))
+          (if arts
+            (progn
+              (mk:leg-merge tbl row)
+              (mk:tab-set tbl row 0 (strcat "   {\\L" *mk:leg-h2* "}"))
+              (mk:tab-align tbl row 0 4)
+              (vl-catch-all-apply 'vla-SetRowHeight (list tbl row 8.0))
+              (setq row (1+ row))
+              (foreach p arts
+                (mk:tab-set tbl row 0
+                  (if (> (strlen (car p)) 0) (car p) *mk:leg-none*))
+                (mk:tab-set tbl row 1 (cdr p))
+                (mk:tab-align tbl row 0 5)
+                (mk:tab-align tbl row 1 4)
+                (vl-catch-all-apply 'vla-SetRowHeight (list tbl row 8.0))
+                (setq row (1+ row)))))
+          (vl-catch-all-apply 'vla-Update (list tbl))
+          (vl-catch-all-apply 'setvar (list "CMDECHO" old-echo))
+          (prompt (strcat "\n  [OK] Таблица обозначений, строк: "
+                          (itoa (+ (length sfx) (length arts)))))
+          tbl)))))
+
+;;;--- Обозначения в XLS (дополнительный лист) --------------------------
+(defun mk:leg-xls (sfx arts f)
+  (if (or sfx arts)
+    (progn
+      (write-line " <Worksheet ss:Name=\"Обозначения\">" f)
+      (write-line "  <Table>" f)
+      (write-line "   <Column ss:Width=\"110\"/>" f)
+      (write-line "   <Column ss:Width=\"320\"/>" f)
+      (write-line (strcat "   <Row><Cell ss:StyleID=\"TITLE\" ss:MergeAcross=\"1\">"
+                          "<Data ss:Type=\"String\">" (mk:xml-esc *mk:leg-title*)
+                          "</Data></Cell></Row>") f)
+      (if sfx
+        (progn
+          (write-line "   <Row>" f)
+          (mk:xcell-m f "SU" 1 "String" *mk:leg-h1*)
+          (write-line "   </Row>" f)
+          (foreach p sfx
+            (write-line "   <Row>" f)
+            (mk:xcell f "H" nil "String" (car p))
+            (mk:xcell f "D" nil "String" (cdr p))
+            (write-line "   </Row>" f))))
+      (if arts
+        (progn
+          (write-line "   <Row>" f)
+          (mk:xcell-m f "SU" 1 "String" *mk:leg-h2*)
+          (write-line "   </Row>" f)
+          (foreach p arts
+            (write-line "   <Row>" f)
+            (mk:xcell f "H" nil "String"
+              (if (> (strlen (car p)) 0) (car p) *mk:leg-none*))
+            (mk:xcell f "D" nil "String" (cdr p))
+            (write-line "   </Row>" f))))
+      (write-line "  </Table>" f)
+      (write-line " </Worksheet>" f)))
+  nil)
+
 ;;;--- Команда -----------------------------------------------------------
+(setq *mk:leg-sfx* nil)
+(setq *mk:leg-arts* nil)
+
 (defun c:МАРКАВТАБЛ (/ ss data posts beams rows agg do-tbl do-xls file doc
-                       prefix bounds acc res pt2 h)
+                       prefix bounds acc res pt2 pt3 h h2 tbl2)
   (prompt "\n[МАРКАВТАБЛ] Ведомость профилей (стойки + ригели)...")
   (setq *mk:dyn-cache* nil)
   ;; вопрос о припуске задаётся один раз за прогон
@@ -3741,6 +3951,10 @@
       (if acc
         (prompt (strcat "\n  Закладных (позиций): " (itoa (length acc))))
         (prompt "\n  Закладные (Пятка/Кронштейн) не найдены."))
+      ;; условные обозначения: только реально встретившиеся
+      (setq *mk:leg-sfx*  (mk:leg-suffixes agg)
+            *mk:leg-arts* (mk:leg-articles beams))
+      (mk:leg-print *mk:leg-sfx* *mk:leg-arts*)
       (initget "Да Нет")
       (setq do-tbl (getkword "\nТаблица в чертеже? [Да/Нет] <Да>: "))
       (setq do-tbl (if (= do-tbl "Нет") nil t))
@@ -3757,15 +3971,24 @@
       (if do-tbl
         (progn
           (setq res (mk:tab-create agg))
-          ;; вторая таблица — комплектующие, под ведомостью профилей
-          (if (and res acc)
+          ;; вторая таблица — закладные, под ведомостью профилей
+          (if res
             (progn
               (setq h (vl-catch-all-apply 'vlax-get-property (list (car res) 'Height)))
               (if (vl-catch-all-error-p h) (setq h (* 12.0 (+ 3 (length agg)))))
               (setq pt2 (list (car (cadr res))
                               (- (cadr (cadr res)) h *mk:acc-gap*)
                               0.0))
-              (mk:acc-table-create acc pt2)))))
+              (setq tbl2 (if acc (mk:acc-table-create acc pt2) nil))
+              ;; третья таблица — условные обозначения
+              (setq pt3 pt2)
+              (if tbl2
+                (progn
+                  (setq h2 (vl-catch-all-apply 'vlax-get-property (list tbl2 'Height)))
+                  (if (vl-catch-all-error-p h2)
+                    (setq h2 (* 12.0 (+ 3 (length acc)))))
+                  (setq pt3 (list (car pt2) (- (cadr pt2) h2 *mk:acc-gap*) 0.0))))
+              (mk:leg-table-create *mk:leg-sfx* *mk:leg-arts* pt3)))))
       (mk:undo-end doc)
       (prompt "\n[ГОТОВО] Ведомость сформирована.")))
   (princ))
