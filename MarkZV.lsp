@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.4")
+(setq *mk:ver*            "3.5")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -3520,13 +3520,41 @@
       t)))
 
 ;;;=====================================================================
-;;; 20c. КОМПЛЕКТУЮЩИЕ: атрибуты «Пятка*» и «Кронштейн*» динамических блоков
+;;; 20c. ЗАКЛАДНЫЕ: атрибуты «Пятка*» и «Кронштейн*» динамических блоков
 ;;;   Собираются только у вставок блоков (мультилинии игнорируются),
 ;;;   агрегируются по паре «атрибут + значение» и выводятся второй таблицей.
 ;;;=====================================================================
 (setq *mk:acc-masks*    '("Пятка*" "Кронштейн*"))
 (setq *mk:acc-gap*      30.0)   ; отступ второй таблицы от первой
-(setq *mk:acc-title*    "Ведомость комплектующих")
+(setq *mk:acc-title*    "Ведомость закладных")
+
+;; Приведение тега атрибута к наименованию закладной: (маска . наименование).
+;; Порядок списка задаёт порядок разделов в ведомости.
+(setq *mk:acc-names*
+  '(("КРОНШТЕЙН*"                    . "Кронштейн")
+    ("ПЯТКА*НИЖ*"                    . "Пятка нижняя")
+    ("ПЯТКА*НИЗ*"                    . "Пятка нижняя")
+    ("ПЯТКА*Н"                       . "Пятка нижняя")
+    ("ПЯТКА*ВЕРХ*"                   . "Пятка верхняя")
+    ("ПЯТКА*В"                       . "Пятка верхняя")
+    ("ПЯТКА*"                        . "Пятка")))
+
+;; Наименование по тегу атрибута (если маска не подошла — сам тег)
+(defun mk:acc-name (tag / out)
+  (setq out nil)
+  (foreach pair *mk:acc-names*
+    (if (and (null out) (mk:strp tag) (wcmatch (strcase (mk:trim tag)) (car pair)))
+      (setq out (cdr pair))))
+  (if out out (mk:trim tag)))
+
+;; Ранг наименования для сортировки (позиция в *mk:acc-names*)
+(defun mk:acc-rank (name / i out)
+  (setq i 0 out nil)
+  (foreach pair *mk:acc-names*
+    (if (and (null out) (= (strcase (cdr pair)) (strcase name)))
+      (setq out i))
+    (setq i (1+ i)))
+  (if out out 99))
 (setq *mk:acc-empty*    '("" "-" "—" "НЕТ" "НЕА" "0"))
 
 ;; Все атрибуты вставки: список (тег . значение)
@@ -3559,23 +3587,29 @@
       (member (strcase (mk:trim v)) *mk:acc-empty*)))
 
 ;; Агрегация: ((тег значение кол-во) ...)
-(defun mk:acc-rows (elements / out key hit tag val)
+(defun mk:acc-rows (elements / out key hit tag val nm)
   (setq out nil)
   (foreach el elements
     (foreach pair (mk:attr-list (mk:rec-get el 'ENAME))
       (setq tag (car pair) val (cdr pair))
       (if (and (mk:acc-mask-hit? tag) (not (mk:acc-empty? val)))
         (progn
-          (setq key (strcat (strcase tag) "|" (strcase val))
+          (setq nm  (mk:acc-name tag)
+                val (mk:trim val)
+                key (strcat (strcase nm) "|" (strcase val))
                 hit (assoc key out))
           (if hit
-            (setq out (subst (list key tag val (1+ (nth 3 hit))) hit out))
-            (setq out (cons (list key tag val 1) out)))))))
+            (setq out (subst (list key nm val (1+ (nth 3 hit))) hit out))
+            (setq out (cons (list key nm val 1) out)))))))
   (setq out (mapcar '(lambda (r) (list (nth 1 r) (nth 2 r) (nth 3 r))) out))
+  ;; сортировка: наименование (порядок *mk:acc-names*) -> значение (натурально)
   (vl-sort out '(lambda (a b)
-                  (if (= (mk:nat-key (nth 0 a)) (mk:nat-key (nth 0 b)))
-                    (< (mk:nat-key (nth 1 a)) (mk:nat-key (nth 1 b)))
-                    (< (mk:nat-key (nth 0 a)) (mk:nat-key (nth 0 b)))))))
+                  (cond
+                    ((not (= (mk:acc-rank (nth 0 a)) (mk:acc-rank (nth 0 b))))
+                     (< (mk:acc-rank (nth 0 a)) (mk:acc-rank (nth 0 b))))
+                    ((not (= (mk:nat-key (nth 0 a)) (mk:nat-key (nth 0 b))))
+                     (< (mk:nat-key (nth 0 a)) (mk:nat-key (nth 0 b))))
+                    (t (< (mk:nat-key (nth 1 a)) (mk:nat-key (nth 1 b))))))))
 
 ;;;--- Таблица комплектующих в чертеже ----------------------------------
 (defun mk:acc-table-create (data pt / doc space tbl nRows row n-row i hdr
@@ -3605,7 +3639,7 @@
           (mk:tab-set tbl 0 0 *mk:acc-title*)
           (vl-catch-all-apply 'vla-SetRowHeight (list tbl 0 8.0))
           (setq i 0)
-          (foreach hdr '("№" "Наименование" "Артикул / значение" "Кол-во, шт.")
+          (foreach hdr '("№" "Наименование" "Тип" "Кол-во, шт.")
             (mk:tab-set tbl 1 i hdr)
             (mk:tab-align tbl 1 i 5)
             (setq i (1+ i)))
@@ -3631,14 +3665,14 @@
           (vl-catch-all-apply 'vla-SetRowHeight (list tbl row 8.0))
           (vl-catch-all-apply 'vla-Update (list tbl))
           (vl-catch-all-apply 'setvar (list "CMDECHO" old-echo))
-          (prompt (strcat "\n  [OK] Таблица комплектующих, строк: " (itoa (length data))))
+          (prompt (strcat "\n  [OK] Таблица закладных, строк: " (itoa (length data))))
           tbl)))))
 
-;;;--- Комплектующие в XLS (дополнительный лист) ------------------------
+;;;--- Закладные в XLS (дополнительный лист) ----------------------------
 (defun mk:acc-xls (data f / n total hdr)
   (if data
     (progn
-      (write-line " <Worksheet ss:Name=\"Комплектующие\">" f)
+      (write-line " <Worksheet ss:Name=\"Закладные\">" f)
       (write-line "  <Table>" f)
       (foreach hdr '("30" "180" "180" "80")
         (write-line (strcat "   <Column ss:Width=\"" hdr "\"/>") f))
@@ -3646,7 +3680,7 @@
                           "<Data ss:Type=\"String\">" (mk:xml-esc *mk:acc-title*)
                           "</Data></Cell></Row>") f)
       (write-line "   <Row>" f)
-      (foreach hdr '("№" "Наименование" "Артикул / значение" "Кол-во, шт.")
+      (foreach hdr '("№" "Наименование" "Тип" "Кол-во, шт.")
         (mk:xcell f "H" nil "String" hdr))
       (write-line "   </Row>" f)
       (setq n 0 total 0)
@@ -3705,8 +3739,8 @@
       ;; комплектующие: атрибуты «Пятка*» / «Кронштейн*» у блоков
       (setq acc (mk:acc-rows (append posts beams)))
       (if acc
-        (prompt (strcat "\n  Комплектующих (позиций): " (itoa (length acc))))
-        (prompt "\n  Комплектующие (Пятка/Кронштейн) не найдены."))
+        (prompt (strcat "\n  Закладных (позиций): " (itoa (length acc))))
+        (prompt "\n  Закладные (Пятка/Кронштейн) не найдены."))
       (initget "Да Нет")
       (setq do-tbl (getkword "\nТаблица в чертеже? [Да/Нет] <Да>: "))
       (setq do-tbl (if (= do-tbl "Нет") nil t))
