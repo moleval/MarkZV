@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Баланс скобок в .lsp (аналог TEST 00 / MK_CHECK, но вне AutoCAD).
+"""Баланс скобок в .lsp (аналог TEST 00 / МАРКАВСКОБКИ, но вне AutoCAD).
 
 Использование:
     python3 tools/check_parens.py MarkZV.lsp

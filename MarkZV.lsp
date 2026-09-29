@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.9")
+(setq *mk:ver*            "4.0")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -127,7 +127,6 @@
 (setq *mk:tol-skew*       5.0)
 (setq *mk:tol-threshold*  50.0)
 (setq *mk:tol-size*       0.5)
-(setq *mk:vitrage-radius* 10000.0)
 (setq *mk:slope-tol*      0.0033)
 (setq *mk:out-file*       "D:/MARKZV_MODEL.txt")
 (setq *mk:diag-file*      "D:/MARKZV_DIAG.txt")
@@ -210,7 +209,6 @@
 (setq *mk:seg-types*            '("MLINE"))
 ;;; Т-соединения
 (setq *mk:tol-tjoint*           30.0)   ; допуск примыкания торца к ригелю
-(setq *mk:tol-tcenter*          30.0)   ; допуск «Т строго по центру ригеля»
 (setq *mk:suffix-tjoint-lo*     ".1")   ; Т-соединение снизу (импост идёт вверх)
 (setq *mk:suffix-tjoint-hi*     ".2")   ; Т-соединение сверху (импост идёт вниз)
 (setq *mk:suffix-tjoint-both*   ".3")   ; Т-соединения с обеих сторон
@@ -735,18 +733,6 @@
 ;;;=====================================================================
 ;;; 8. ИЗВЛЕЧЕНИЕ МУЛЬТИЛИНИЙ
 ;;;=====================================================================
-(defun mk:find-mlines (/ ss i e lst)
-  (setq lst nil)
-  (setq ss (ssget "_X" (list (cons 0 "MLINE"))))
-  (if ss
-    (progn
-      (setq i 0)
-      (repeat (sslength ss)
-        (setq e (ssname ss i))
-        (setq lst (cons e lst))
-        (setq i (1+ i)))))
-  lst)
-
 (defun mk:get-mline-verts (ename / ed verts)
   (setq ed (entget ename) verts nil)
   (foreach p ed
@@ -2738,9 +2724,9 @@
 ;;; Т-СОЕДИНЕНИЯ
 ;;; Т-соединение — вертикальный элемент упирается торцом в ригель внутри его
 ;;; пролёта (не на конце). Такому ригелю даётся суффикс:
-;;;   .1 — если Т строго по центру длины ригеля (и у пары ригелей один артикул
-;;;        либо артикула нет) или если ригель расположен снизу от стойки;
-;;;   .2 — ригель сверху от стойки в несимметричном узле.
+;;;   .1 — Т снизу (импост идёт вверх от ригеля);
+;;;   .2 — Т сверху (импост идёт вниз к ригелю);
+;;;   .3 — Т с обеих сторон.
 ;;; Вертикальный элемент с двумя Т-соединениями считается ригелем (суффикс «т»),
 ;;; с одним — остаётся стойкой.
 ;;;---------------------------------------------------------------------
@@ -2759,16 +2745,6 @@
                      (< x (- bx1 *mk:tol-tjoint*)))
               (setq out b)))))))
   out)
-
-;; Т-точка по центру длины ригеля?
-(defun mk:t-centered? (beam x / p len)
-  (setq p   (cdr (assoc 'INS_PT beam))
-        len (if (numberp (cdr (assoc 'LENGTH beam))) (cdr (assoc 'LENGTH beam)) 0.0))
-  (and p (> len 0.0)
-       (<= (abs (- x (+ (car p) (/ len 2.0)))) *mk:tol-tcenter*)))
-
-(defun mk:art-of (el)
-  (if (and el (mk:strp (mk:rec-get el 'ARTICLE))) (strcase (mk:rec-get el 'ARTICLE)) ""))
 
 ;; Карта суффиксов: ключ — ENAME ригеля; «.1» имеет приоритет над «.2»
 ;; Накопление ролей ригеля в Т-узлах: ключ ENAME -> (есть-снизу есть-сверху)
@@ -3242,10 +3218,6 @@
       (prompt (strcat "\n  Принято: +" (rtos *mk:allowance-unknown* 2 1)
                       " мм к " (itoa n) " ригел(ю/ям) без артикула."))))
   (if (numberp *mk:allowance-unknown*) *mk:allowance-unknown* 0.0))
-
-;; Длина профиля ригеля = нарисованный размер + припуск
-(defun mk:beam-cut-len (len)
-  (if (numberp len) (+ (float len) *mk:beam-allowance*) 0.0))
 
 ;; Вертикальный ригель («т») считается как КП50 — без припуска
 (defun mk:beam-cut-len-el (el / len)

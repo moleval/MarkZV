@@ -1,0 +1,14 @@
+# Локальные базы профилей (генерируются из xlsx, у каждого свои)
+MarkZV-bases.lsp
+
+# Артефакты прогонов AutoCAD
+MARKZV_MODEL.txt
+MARKZV_DIAG.txt
+*.bak
+*.dwl
+*.dwl2
+*~
+
+# Python
+__pycache__/
+*.pyc
