@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.0")
+(setq *mk:ver*            "3.1")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -212,6 +212,12 @@
 (setq *mk:suffix-tjoint-hi*     ".2")   ; ригель над вертикальным элементом
 (setq *mk:suffix-vert-beam*     "т")    ; вертикальный элемент с двумя Т
 (setq *mk:label-short-len*      400.0)  ; короткий ригель: подпись по центру
+;; Надпись длины L=xxx мм по оси элемента
+(setq *mk:label-len-show*       t)      ; выводить ли надпись длины
+(setq *mk:label-len-height*     30.0)   ; высота текста длины
+(setq *mk:label-len-prefix*     "L=")
+(setq *mk:label-len-suffix*     " мм")
+(setq *mk:label-len-shift*      0.0)    ; смещение от оси поперёк элемента
 (setq *mk:thick-warm-min*       42.0)
 (setq *mk:thick-warm-max*       60.0)
 (setq *mk:thick-cold-min*       4.0)
@@ -2457,7 +2463,7 @@
   (setq top (mk:rec-get el 'TOP_ELEM))
   (and top (= (cdr (assoc 'TYPE top)) "ОКНО")))
 
-(defun mk:label-anchor (el / p len cross etype x y rot dx dy step just below)
+(defun mk:label-anchor (el / p len cross etype x y rot dx dy step just below ax)
   (setq p     (cdr (assoc 'INS_PT el))
         len   (if (numberp (cdr (assoc 'LENGTH el))) (cdr (assoc 'LENGTH el)) 0.0)
         cross (if (numberp (mk:rec-get el 'CROSS)) (mk:rec-get el 'CROSS) 0.0)
@@ -2489,14 +2495,18 @@
           (if (< len *mk:label-short-len*)            ; короткий — по центру
             (setq x (+ (car p) (/ len 2.0)) just 1)
             (setq x (+ (car p) (- len *mk:label-end-gap*))))))
-      (list (list x y 0.0) rot dx dy just))))
+      ;; точка на оси элемента: вдоль — как у марки, поперёк — по оси
+      (if (or (= etype "СТОЙКА") (mk:rec-get el 'VERT))
+        (setq ax (list (+ (car p) *mk:label-len-shift*) y 0.0))
+        (setq ax (list x (+ (cadr p) *mk:label-len-shift*) 0.0)))
+      (list (list x y 0.0) rot dx dy just ax))))
 
 ;; Одна строка текста с выравниванием вправо
-(defun mk:label-text (pt rot str just / dxf sty)
+(defun mk:label-text (pt rot str just h / dxf sty)
   (setq dxf (list '(0 . "TEXT")
                   (cons 8 *mk:layer-label*)
                   (cons 10 pt)
-                  (cons 40 *mk:label-height*)
+                  (cons 40 (if (numberp h) h *mk:label-height*))
                   (cons 1 str)
                   (cons 50 (* pi (/ rot 180.0)))
                   (cons 62 *mk:label-color*)
@@ -2507,8 +2517,18 @@
     (setq dxf (append dxf (list (cons 7 sty)))))
   (entmakex dxf))
 
-;; Выноска: марка, а следом артикул (если он известен)
-(defun mk:label-mark (el mark-str / anc pt rot dx dy just art e n)
+;; Строка длины: L=xxx мм (с припуском для ригелей, у стоек припуска нет)
+(defun mk:label-len-str (el / v)
+  (setq v (if (= (cdr (assoc 'TYPE el)) "РИГЕЛЬ")
+            (mk:beam-cut-len-el el)
+            (mk:rec-get el 'LENGTH)))
+  (if (numberp v)
+    (strcat *mk:label-len-prefix* (itoa (fix (+ (float v) 0.5)))
+            *mk:label-len-suffix*)
+    nil))
+
+;; Выноска: марка, следом артикул, и длина по оси элемента
+(defun mk:label-mark (el mark-str / anc pt rot dx dy just ax art ls e n)
   (setq anc (mk:label-anchor el)
         art (mk:rec-get el 'ARTICLE)
         n   0)
@@ -2518,12 +2538,17 @@
       (mk:ensure-layer *mk:layer-label* *mk:label-color*)
       (setq pt   (nth 0 anc) rot (nth 1 anc)
             dx   (nth 2 anc) dy  (nth 3 anc)
-            just (if (nth 4 anc) (nth 4 anc) 2))
-      (if (setq e (mk:label-text pt rot mark-str just))
+            just (if (nth 4 anc) (nth 4 anc) 2)
+            ax   (nth 5 anc))
+      (if (setq e (mk:label-text pt rot mark-str just *mk:label-height*))
         (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n))))
       (if (and (mk:strp art) (> (strlen art) 0))
         (if (setq e (mk:label-text (list (+ (car pt) dx) (+ (cadr pt) dy) 0.0)
-                                   rot art just))
+                                   rot art just *mk:label-height*))
+          (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n)))))
+      ;; длина по оси элемента
+      (if (and *mk:label-len-show* ax (setq ls (mk:label-len-str el)))
+        (if (setq e (mk:label-text ax rot ls just *mk:label-len-height*))
           (progn (setq *mk:labels* (cons e *mk:labels*)) (setq n (1+ n)))))
       (> n 0))))
 
