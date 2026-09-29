@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "3.8")
+(setq *mk:ver*            "3.9")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -1494,7 +1494,13 @@
        (<= by (cadr span))))
 
 (defun mk:validate-beam (beam posts beams / has-connection bx by bx2 ox oy beam-len)
-  (setq has-connection nil)
+  ;; Ред. 3.9: вертикальный ригель (импост Т-узла) примыкает торцами
+  ;; к серединам ригелей — это норма, а не ошибка.
+  (if (mk:rec-get beam 'VERT)
+    (setq has-connection t)
+    (setq has-connection nil))
+  (if (not has-connection)
+   (progn
   (setq beam-len (if (cdr (assoc 'LENGTH beam)) (cdr (assoc 'LENGTH beam)) 0.0))
   (setq bx  (car (cdr (assoc 'INS_PT beam)))
         by  (cadr (cdr (assoc 'INS_PT beam)))
@@ -1519,12 +1525,17 @@
             (setq has-connection t))))))
   (if (not has-connection)
     (prompt (strcat "\n  [ERROR] Ригель без примыкания: "
-                    (rtos bx 2 1) "," (rtos by 2 1))))
+                    (rtos bx 2 1) "," (rtos by 2 1))))))
   has-connection)
 
-(defun mk:validate-fill (fill posts / left-post right-post)
-  (setq left-post (mk:find-left-post fill posts)
-        right-post (mk:find-right-post fill posts))
+(defun mk:validate-fill (fill posts beams / left-post right-post bounds b)
+  ;; Ред. 3.9: границей ячейки может быть и вертикальный ригель (импост
+  ;; Т-узла) — подъячейки под фрамугой не должны считаться ошибкой.
+  (setq bounds posts)
+  (foreach b beams
+    (if (mk:rec-get b 'VERT) (setq bounds (cons b bounds))))
+  (setq left-post (mk:find-left-post fill bounds)
+        right-post (mk:find-right-post fill bounds))
   (if (or (null left-post) (null right-post))
     (progn
       (prompt (strcat "\n  [ERROR] Заполнение вне ячейки: "
@@ -2294,8 +2305,11 @@
 ;; по возрастанию. Индекс в этой шкале и есть цифра марки ригеля —
 ;; так она совпадает с цифрой марки заполнения (в MarkZ: номер = ширина).
 (defun mk:length-scale (beams panels / bvals pvals out extra v)
-  ;; Блок 1 — длины горизонтальных ригелей «в свету» (приоритет за ригелями).
-  ;; Вертикальные ригели («т») нумеруются отдельно, после всех обычных.
+  ;; Шкала номеров = длины горизонтальных ригелей «в свету», по возрастанию.
+  ;; Ред. 3.9: ширины заполнений шкалу больше НЕ расширяют — секция всегда
+  ;; ограничена ригелями, а узкие подъячейки под Т-узлом в MarkZ получают
+  ;; подындекс (.1/.2), а не собственный номер. Несовпавшие ширины
+  ;; выводятся отдельной строкой — для сверки с «<dwg> Шкала.txt» MarkZ.
   (setq bvals nil)
   (foreach b beams
     (setq v (mk:rec-get b 'LENGTH))
@@ -2305,28 +2319,27 @@
   (foreach v (vl-sort bvals '<)
     (if (not (member v out)) (setq out (cons v out))))
   (setq out (reverse out))
-  ;; Блок 2 — ширины заполнений, которым не нашлось ригеля такой же длины
-  ;; (сплошное заполнение над Т-соединением). Они получают номера ПОСЛЕ
-  ;; всех «ригельных» размеров и не сдвигают нумерацию ригелей.
-  (setq pvals nil)
+  ;; диагностика: ширины заполнений без парного ригеля
+  (setq pvals nil extra nil)
   (foreach pn panels
     (if (= (mk:rec-get pn 'TYPE) "ЗАПОЛНЕНИЕ")
       (progn
         (setq v (mk:rec-get pn 'WIDTH))
         (if (and (numberp v) (= 0 (mk:scale-index (atof (mk:size-key v)) out)))
           (setq pvals (cons (atof (mk:size-key v)) pvals))))))
-  (setq extra nil)
   (foreach v (vl-sort pvals '<)
-    (if (and (not (member v extra)) (= 0 (mk:scale-index v out)))
-      (setq extra (cons v extra))))
+    (if (not (member v extra)) (setq extra (cons v extra))))
   (setq extra (reverse extra))
+  (prompt (strcat "\n  [INFO] Шкала размеров в свету: " (itoa (length out))
+                  " (по ригелям)"))
   (if extra
-    (prompt (strcat "\n  [INFO] Шкала размеров в свету: ригельных "
-                    (itoa (length out)) ", только у заполнений "
-                    (itoa (length extra))
-                    " (номера " (itoa (1+ (length out))) "…"
-                    (itoa (+ (length out) (length extra))) ")")))
-  (append out extra))
+    (progn
+      (prompt (strcat "\n  [WARN] Ширин заполнений без ригеля: "
+                      (itoa (length extra))
+                      " — в MarkZ это подъячейки Т-узла (подындекс .1/.2):"))
+      (foreach v extra
+        (prompt (strcat "\n           " (rtos v 2 0))))))
+  out)
 
 (defun mk:vert-scale (beams / vals v out)
   (setq vals nil)
@@ -3035,7 +3048,7 @@
   (prompt "\n  Валидация ригелей...")
   (foreach beam beams (mk:validate-beam beam posts beams))
   (prompt "\n  Валидация заполнений...")
-  (foreach fill fills (mk:validate-fill fill posts))
+  (foreach fill fills (mk:validate-fill fill posts beams))
   (prompt "\n[5/8] Построение топологии связей...")
   (setq topo-result (mk:build-topology posts beams fills windows doors bounds))
   (setq posts   (nth 0 topo-result))
