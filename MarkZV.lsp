@@ -98,7 +98,7 @@
 ;;; 1. КОНФИГУРАЦИЯ
 ;;;=====================================================================
 ;; Ред. <версия>.<билд>:  версия — крупные задачи, билд — итерация правок
-(setq *mk:ver*            "4.0")
+(setq *mk:ver*            "4.1")
 
 (setq *mk:block-fill*     "Заполнение в витраж")
 (setq *mk:block-window*   "Окно КПТ60")
@@ -209,6 +209,8 @@
 (setq *mk:seg-types*            '("MLINE"))
 ;;; Т-соединения
 (setq *mk:tol-tjoint*           30.0)   ; допуск примыкания торца к ригелю
+(setq *mk:tol-tcenter*          30.0)   ; допуск «Т строго по центру ригеля»
+(setq *mk:tj-symmetric*         t)      ; симметричный узел -> оба ригеля «.1»
 (setq *mk:suffix-tjoint-lo*     ".1")   ; Т-соединение снизу (импост идёт вверх)
 (setq *mk:suffix-tjoint-hi*     ".2")   ; Т-соединение сверху (импост идёт вниз)
 (setq *mk:suffix-tjoint-both*   ".3")   ; Т-соединения с обеих сторон
@@ -2727,6 +2729,11 @@
 ;;;   .1 — Т снизу (импост идёт вверх от ригеля);
 ;;;   .2 — Т сверху (импост идёт вниз к ригелю);
 ;;;   .3 — Т с обеих сторон.
+;;; Частный случай (симметричный узел, *mk:tj-symmetric*): импост стоит строго
+;;; по центру обоих ригелей (допуск *mk:tol-tcenter*), у ригелей одинаковые
+;;; длина и артикул, в примыкающих ячейках нет окон и дверей, а толщины
+;;; заполнений совпадают (если заданы) — тогда нижний и верхний ригели
+;;; взаимозаменяемы и оба получают «.1».
 ;;; Вертикальный элемент с двумя Т-соединениями считается ригелем (суффикс «т»),
 ;;; с одним — остаётся стойкой.
 ;;;---------------------------------------------------------------------
@@ -2761,6 +2768,78 @@
         (subst (cons e (list lo hi)) hit map)
         (cons (cons e (list lo hi)) map)))))
 
+;; Т-точка по центру длины ригеля?
+(defun mk:t-centered? (beam x / p len)
+  (setq p   (cdr (assoc 'INS_PT beam))
+        len (mk:len-or0 beam))
+  (and p (> len 0.0)
+       (<= (abs (- x (+ (car p) (/ len 2.0)))) *mk:tol-tcenter*)))
+
+;; Длина элемента или 0.0
+(defun mk:len-or0 (el / v)
+  (setq v (mk:numval (cdr (assoc 'LENGTH el))))
+  (if (numberp v) v 0.0))
+
+;; Толщина заполнения как строка сравнения ("" -> nil)
+(defun mk:th-key (pn / v)
+  (setq v (cdr (assoc 'THICKNESS pn)))
+  (cond ((numberp v) (rtos (float v) 2 2))
+        ((and (mk:strp v) (> (strlen (mk:trim v)) 0)) (mk:trim v))
+        (t nil)))
+
+;; Центр панели (INS_PT + половина габарита)
+(defun mk:panel-center (pn / p w h)
+  (setq p (cdr (assoc 'INS_PT pn))
+        w (mk:numval (cdr (assoc 'WIDTH pn)))
+        h (mk:numval (cdr (assoc 'HEIGHT pn))))
+  (if p
+    (list (+ (car p)  (if (numberp w) (/ w 2.0) 0.0))
+          (+ (cadr p) (if (numberp h) (/ h 2.0) 0.0)))))
+
+;; Панели, попадающие в узел: по X — в пролёт ригеля, по Y — между ригелями
+(defun mk:tj-panels (bb ba panels / out pb pa x0 x1 y0 y1 c)
+  (setq pb (cdr (assoc 'INS_PT bb))
+        pa (cdr (assoc 'INS_PT ba))
+        x0 (min (car pb) (car pa))
+        x1 (max (+ (car pb) (mk:len-or0 bb)) (+ (car pa) (mk:len-or0 ba)))
+        y0 (min (cadr pb) (cadr pa))
+        y1 (max (cadr pb) (cadr pa))
+        out nil)
+  (foreach pn panels
+    (setq c (mk:panel-center pn))
+    (if (and c
+             (> (car c)  (- x0 *mk:tol-adjacency*))
+             (< (car c)  (+ x1 *mk:tol-adjacency*))
+             (> (cadr c) (- y0 *mk:tol-adjacency*))
+             (< (cadr c) (+ y1 *mk:tol-adjacency*)))
+      (setq out (cons pn out))))
+  out)
+
+;; Симметричный Т-узел: оба ригеля взаимозаменяемы -> обоим «.1»
+(defun mk:tj-symmetric? (bb ba vx panels / lb la ab aa cells th bad)
+  (setq lb (mk:numval (cdr (assoc 'LENGTH bb)))
+        la (mk:numval (cdr (assoc 'LENGTH ba)))
+        ab (strcase (if (mk:strp (cdr (assoc 'ARTICLE bb))) (cdr (assoc 'ARTICLE bb)) ""))
+        aa (strcase (if (mk:strp (cdr (assoc 'ARTICLE ba))) (cdr (assoc 'ARTICLE ba)) "")))
+  (if (not (and *mk:tj-symmetric*
+                (mk:t-centered? bb vx) (mk:t-centered? ba vx)
+                (numberp lb) (numberp la)
+                (<= (abs (- lb la)) *mk:tol-size*)
+                (= ab aa)))
+    nil
+    (progn
+      (setq cells (mk:tj-panels bb ba panels) th nil bad nil)
+      (foreach pn cells
+        (cond
+          ;; окно или дверь в ячейке — узел несимметричен
+          ((not (= (cdr (assoc 'TYPE pn)) "ЗАПОЛНЕНИЕ")) (setq bad t))
+          ;; толщина заполнения (если задана) должна совпадать
+          ((mk:th-key pn)
+           (if (null th)
+             (setq th (mk:th-key pn))
+             (if (not (= th (mk:th-key pn))) (setq bad t))))))
+      (not bad))))
+
 ;; Роли -> суффикс
 (defun mk:tj-suffix (roles)
   (cond
@@ -2770,9 +2849,9 @@
     (t nil)))
 
 ;; Разбор узлов: возвращает (стойки ригели)
-(defun mk:split-tjoints (posts beams / map newposts newbeams p len vx vy0 vy1
-                                       bb ba nT e hit)
-  (setq map nil newposts nil newbeams nil)
+(defun mk:split-tjoints (posts beams panels / map newposts newbeams p len vx vy0 vy1
+                                              bb ba nT e hit nsym)
+  (setq map nil newposts nil newbeams nil nsym 0)
   (foreach v posts
     (setq p   (cdr (assoc 'INS_PT v))
           len (if (numberp (cdr (assoc 'LENGTH v))) (cdr (assoc 'LENGTH v)) 0.0))
@@ -2782,15 +2861,25 @@
         (setq vx  (car p) vy0 (cadr p) vy1 (+ (cadr p) len)
               bb  (mk:beam-hit vx vy0 beams)      ; ригель снизу от импоста
               ba  (mk:beam-hit vx vy1 beams))     ; ригель сверху от импоста
-        ;; для нижнего ригеля Т приходит сверху -> роль lo, для верхнего -> hi
-        (if bb (setq map (mk:tj-put map bb 'lo)))
-        (if ba (setq map (mk:tj-put map ba 'hi)))
+        ;; для нижнего ригеля Т приходит сверху -> роль lo, для верхнего -> hi;
+        ;; симметричный узел -> обоим роль lo, то есть «.1»
+        (cond
+          ((and bb ba (mk:tj-symmetric? bb ba vx panels))
+           (setq map  (mk:tj-put map bb 'lo)
+                 map  (mk:tj-put map ba 'lo)
+                 nsym (1+ nsym)))
+          (t
+           (if bb (setq map (mk:tj-put map bb 'lo)))
+           (if ba (setq map (mk:tj-put map ba 'hi)))))
         (setq nT (+ (if bb 1 0) (if ba 1 0)))
         (if (= nT 2)
           ;; вертикальный элемент между двумя ригелями -> это ригель
           (setq newbeams (cons (mk:rec-put (mk:rec-put v 'TYPE "РИГЕЛЬ") 'VERT t)
                                newbeams))
           (setq newposts (cons v newposts))))))
+  (if (> nsym 0)
+    (prompt (strcat "\n  [INFO] Симметричных Т-узлов (оба ригеля «"
+                    *mk:suffix-tjoint-lo* "»): " (itoa nsym))))
   ;; проставить суффиксы Т-соединений ригелям
   (setq beams (mapcar
                 '(lambda (b / e hit)
@@ -2823,9 +2912,7 @@
                    (mk:find-blocks-in-ss ss (strcat "*" *mk:block-beam* "*"))))))
   (setq posts (mk:sanitize-frame posts "Стойки"))
   (setq beams (mk:sanitize-frame beams "Ригели"))
-  (setq res   (mk:split-tjoints posts beams)
-        posts (nth 0 res)
-        beams (nth 1 res))
+  ;; панели нужны до разбора узлов: по ним проверяется симметрия Т-соединения
   (setq fills   (mk:sanitize-panels
                   (mapcar 'mk:collect-fill (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
                   "Заполнения"))
@@ -2835,6 +2922,9 @@
   (setq doors   (mk:sanitize-panels
                   (mapcar 'mk:collect-door (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door* "*")))
                   "Двери"))
+  (setq res   (mk:split-tjoints posts beams (append fills windows doors))
+        posts (nth 0 res)
+        beams (nth 1 res))
   (list (cons 'POSTS posts) (cons 'BEAMS beams) (cons 'FILLS fills)
         (cons 'WINDOWS windows) (cons 'DOORS doors)
         (cons 'PANELS (append fills windows doors))))
@@ -2988,15 +3078,16 @@
      (setq beams (mapcar 'mk:collect-beam beam-enames))))
   (setq posts (mk:sanitize-frame posts "Стойки"))
   (setq beams (mk:sanitize-frame beams "Ригели"))
-  (setq res   (mk:split-tjoints posts beams)
-        posts (nth 0 res)
-        beams (nth 1 res))
+  ;; панели собираются до разбора узлов: по ним проверяется симметрия Т-соединения
   (setq fills   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-fill* "*")))
   (setq windows (mk:find-blocks-in-ss ss (strcat "*" *mk:block-window* "*")))
   (setq doors   (mk:find-blocks-in-ss ss (strcat "*" *mk:block-door* "*")))
   (setq fills   (mk:sanitize-panels (mapcar 'mk:collect-fill fills)     "Заполнения"))
   (setq windows (mk:sanitize-panels (mapcar 'mk:collect-window windows) "Окна"))
   (setq doors   (mk:sanitize-panels (mapcar 'mk:collect-door doors)     "Двери"))
+  (setq res   (mk:split-tjoints posts beams (append fills windows doors))
+        posts (nth 0 res)
+        beams (nth 1 res))
   (prompt (strcat "\n  Стойки: " (itoa (length posts))))
   (prompt (strcat "\n  Ригели: " (itoa (length beams))))
   (prompt (strcat "\n  Заполнения: " (itoa (length fills))))
